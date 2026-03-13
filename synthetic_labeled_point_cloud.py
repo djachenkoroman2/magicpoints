@@ -86,6 +86,48 @@ LOW_VEG_DEFAULTS: Dict[str, float] = {
     "grass_max_height": 0.65,
 }
 
+BUILDING_ROOF_TYPES: Tuple[str, ...] = (
+    "single_slope",
+    "gable",
+    "hip",
+    "tent",
+    "mansard",
+    "flat",
+    "dome",
+    "arched",
+    "shell",
+)
+BUILDING_ROOF_TYPE_NAMES: Dict[str, str] = {
+    "single_slope": "Single-slope",
+    "gable": "Gable",
+    "hip": "Hip",
+    "tent": "Tent",
+    "mansard": "Mansard",
+    "flat": "Flat",
+    "dome": "Dome",
+    "arched": "Arched",
+    "shell": "Shell",
+}
+DEFAULT_BUILDING_ROOF_TYPE_RATIOS: Dict[str, float] = {
+    "single_slope": 0.10,
+    "gable": 0.18,
+    "hip": 0.14,
+    "tent": 0.08,
+    "mansard": 0.10,
+    "flat": 0.20,
+    "dome": 0.06,
+    "arched": 0.08,
+    "shell": 0.06,
+}
+DEFAULT_BUILDING_ROOF_TYPE_PERCENTAGES: Tuple[float, ...] = tuple(
+    DEFAULT_BUILDING_ROOF_TYPE_RATIOS[roof_type] * 100.0 for roof_type in BUILDING_ROOF_TYPES
+)
+BUILDING_DEFAULTS: Dict[str, int | bool] = {
+    "building_floor_min": 2,
+    "building_floor_max": 9,
+    "building_random_yaw": True,
+}
+
 TREE_CROWN_TYPES: Tuple[str, ...] = (
     "spherical",
     "pyramidal",
@@ -260,6 +302,51 @@ def _tree_crown_type_ratios_from_percentages(
     return {
         crown_type: float(weights[idx])
         for idx, crown_type in enumerate(TREE_CROWN_TYPES)
+    }
+
+
+def _building_roof_type_ratios_from_percentages(
+    building_roof_type_percentages: Sequence[float] | Dict[str, float] | None,
+) -> Dict[str, float]:
+    """
+    Build normalized building roof type ratios from optional percentages.
+    Supports sequence in BUILDING_ROOF_TYPES order or mapping by roof type keys.
+    """
+    if building_roof_type_percentages is None:
+        return dict(DEFAULT_BUILDING_ROOF_TYPE_RATIOS)
+
+    if isinstance(building_roof_type_percentages, dict):
+        normalized: Dict[str, float] = {}
+        for key, value in building_roof_type_percentages.items():
+            roof_type = str(key).strip().lower()
+            if roof_type not in BUILDING_ROOF_TYPES:
+                raise ValueError(
+                    f"Unknown roof type key `{key}` in `building_roof_type_percentages`. "
+                    f"Supported keys are {list(BUILDING_ROOF_TYPES)}."
+                )
+            normalized[roof_type] = float(value)
+        values = [float(normalized.get(roof_type, 0.0)) for roof_type in BUILDING_ROOF_TYPES]
+    else:
+        values = [float(value) for value in building_roof_type_percentages]
+        if len(values) != len(BUILDING_ROOF_TYPES):
+            raise ValueError(
+                "`building_roof_type_percentages` must contain exactly "
+                f"{len(BUILDING_ROOF_TYPES)} values "
+                f"(for roof types {list(BUILDING_ROOF_TYPES)}), got {len(values)}."
+            )
+
+    weights = np.array(values, dtype=np.float64)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("`building_roof_type_percentages` must contain only finite numbers.")
+    if np.any(weights < 0.0):
+        raise ValueError("`building_roof_type_percentages` must be non-negative.")
+    if np.isclose(weights.sum(), 0.0):
+        raise ValueError("At least one building roof type percentage must be > 0.")
+
+    weights = weights / weights.sum()
+    return {
+        roof_type: float(weights[idx])
+        for idx, roof_type in enumerate(BUILDING_ROOF_TYPES)
     }
 
 
@@ -604,46 +691,173 @@ def _generate_building_points(
     cy: float,
     width: float,
     depth: float,
-    height: float,
+    floor_count: int,
+    floor_height: float,
+    roof_type: str,
+    yaw: float,
     base_z: float,
 ) -> np.ndarray:
-    """Points on walls and roof of one rectangular building."""
+    """Generate one building with configurable roof type and Z rotation."""
     if n_points <= 0:
         return np.empty((0, 4), dtype=np.float64)
 
-    roof_n = max(1, int(n_points * 0.22))
+    roof_type_id = str(roof_type).strip().lower()
+    if roof_type_id not in BUILDING_ROOF_TYPES:
+        roof_type_id = "flat"
+
+    floors = max(1, int(floor_count))
+    floor_h = max(2.2, float(floor_height))
+    body_height = float(max(2.8, floors * floor_h + rng.uniform(-0.12, 0.22) * floor_h))
+    roof_height_factor = {
+        "single_slope": 0.52,
+        "gable": 0.62,
+        "hip": 0.56,
+        "tent": 0.70,
+        "mansard": 0.82,
+        "flat": 0.10,
+        "dome": 0.88,
+        "arched": 0.66,
+        "shell": 0.60,
+    }
+    roof_height = float(
+        max(0.3, floor_h * roof_height_factor.get(roof_type_id, 0.55) * rng.uniform(0.85, 1.15))
+    )
+
+    roof_share = {
+        "flat": 0.22,
+        "single_slope": 0.32,
+        "gable": 0.34,
+        "hip": 0.34,
+        "tent": 0.36,
+        "mansard": 0.38,
+        "dome": 0.42,
+        "arched": 0.37,
+        "shell": 0.36,
+    }.get(roof_type_id, 0.33)
+    roof_n = max(1, int(n_points * roof_share))
     wall_n = n_points - roof_n
 
-    x_roof = rng.uniform(cx - width * 0.5, cx + width * 0.5, size=roof_n)
-    y_roof = rng.uniform(cy - depth * 0.5, cy + depth * 0.5, size=roof_n)
-    z_roof = np.full(roof_n, base_z + height) + rng.normal(0.0, 0.02, size=roof_n)
-
+    half_w = 0.5 * float(width)
+    half_d = 0.5 * float(depth)
     face = rng.integers(0, 4, size=wall_n)
-    x_wall = np.empty(wall_n, dtype=np.float64)
-    y_wall = np.empty(wall_n, dtype=np.float64)
-    z_wall = rng.uniform(base_z, base_z + height, size=wall_n)
+    x_wall = np.empty(wall_n, dtype=np.float64) if wall_n > 0 else np.empty(0, dtype=np.float64)
+    y_wall = np.empty(wall_n, dtype=np.float64) if wall_n > 0 else np.empty(0, dtype=np.float64)
+    z_wall = rng.uniform(0.0, body_height, size=wall_n) if wall_n > 0 else np.empty(0)
     u = rng.uniform(-0.5, 0.5, size=wall_n)
 
-    # Sample one of 4 walls per point.
+    # Four vertical walls in local coordinates.
     left = face == 0
     right = face == 1
     front = face == 2
     back = face == 3
 
-    x_wall[left] = cx - width * 0.5
-    y_wall[left] = cy + u[left] * depth
-    x_wall[right] = cx + width * 0.5
-    y_wall[right] = cy + u[right] * depth
-    x_wall[front] = cx + u[front] * width
-    y_wall[front] = cy + depth * 0.5
-    x_wall[back] = cx + u[back] * width
-    y_wall[back] = cy - depth * 0.5
+    if wall_n > 0:
+        x_wall[left] = -half_w
+        y_wall[left] = u[left] * depth
+        x_wall[right] = half_w
+        y_wall[right] = u[right] * depth
+        x_wall[front] = u[front] * width
+        y_wall[front] = half_d
+        x_wall[back] = u[back] * width
+        y_wall[back] = -half_d
 
-    x = np.concatenate([x_roof, x_wall]) + rng.normal(0.0, 0.015, size=n_points)
-    y = np.concatenate([y_roof, y_wall]) + rng.normal(0.0, 0.015, size=n_points)
-    z = np.concatenate([z_roof, z_wall])
+    roof_local = _sample_building_roof_local(
+        rng=rng,
+        n_points=roof_n,
+        width=float(width),
+        depth=float(depth),
+        roof_type=roof_type_id,
+        roof_height=roof_height,
+    )
+    roof_local[:, 2] += body_height
+
+    x_local = np.concatenate([roof_local[:, 0], x_wall])
+    y_local = np.concatenate([roof_local[:, 1], y_wall])
+    z_local = np.concatenate([roof_local[:, 2], z_wall])
+    x_rot, y_rot = _rotate_xy(x_local, y_local, yaw=yaw)
+    x = cx + x_rot + rng.normal(0.0, 0.012, size=n_points)
+    y = cy + y_rot + rng.normal(0.0, 0.012, size=n_points)
+    z = base_z + z_local + rng.normal(0.0, 0.016, size=n_points)
+    z = np.maximum(z, base_z + 0.01)
     labels = np.full(n_points, 4, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
+
+
+def _rotate_xy(x: np.ndarray, y: np.ndarray, yaw: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Rotate local (x, y) around Z by `yaw` radians."""
+    cos_yaw = float(np.cos(yaw))
+    sin_yaw = float(np.sin(yaw))
+    x_rot = x * cos_yaw - y * sin_yaw
+    y_rot = x * sin_yaw + y * cos_yaw
+    return x_rot, y_rot
+
+
+def _sample_building_roof_local(
+    rng: np.random.Generator,
+    n_points: int,
+    width: float,
+    depth: float,
+    roof_type: str,
+    roof_height: float,
+) -> np.ndarray:
+    """Sample roof surface points in local coordinates; z is above body top."""
+    if n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    roof_type_id = str(roof_type).strip().lower()
+    if roof_type_id not in BUILDING_ROOF_TYPES:
+        roof_type_id = "flat"
+
+    half_w = max(0.4, 0.5 * float(width))
+    half_d = max(0.4, 0.5 * float(depth))
+    roof_h = max(0.25, float(roof_height))
+
+    if roof_type_id == "dome":
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=n_points)
+        radial = np.sqrt(rng.uniform(0.0, 1.0, size=n_points))
+        x = half_w * radial * np.cos(theta)
+        y = half_d * radial * np.sin(theta)
+        r2 = np.clip((x / half_w) ** 2 + (y / half_d) ** 2, 0.0, 1.0)
+        z = roof_h * np.sqrt(1.0 - r2)
+        z += rng.normal(0.0, 0.01, size=n_points)
+        return np.column_stack((x, y, z))
+
+    x = rng.uniform(-half_w, half_w, size=n_points)
+    y = rng.uniform(-half_d, half_d, size=n_points)
+    x_norm = np.clip(np.abs(x) / half_w, 0.0, 1.0)
+    y_norm = np.clip(np.abs(y) / half_d, 0.0, 1.0)
+
+    if roof_type_id == "single_slope":
+        slope = 0.5 + 0.5 * np.clip(x / half_w, -1.0, 1.0)
+        z = roof_h * (0.14 + 0.86 * slope)
+    elif roof_type_id == "gable":
+        ridge = 1.0 - x_norm
+        z = roof_h * np.clip(0.10 + 0.90 * ridge, 0.0, 1.0)
+    elif roof_type_id == "hip":
+        ridge = 1.0 - np.clip(0.62 * x_norm + 0.38 * y_norm, 0.0, 1.0)
+        z = roof_h * np.clip(0.08 + 0.92 * ridge, 0.0, 1.0)
+    elif roof_type_id == "tent":
+        ridge = 1.0 - np.maximum(x_norm, y_norm)
+        z = roof_h * np.clip(ridge, 0.0, 1.0)
+    elif roof_type_id == "mansard":
+        r = np.maximum(x_norm, y_norm)
+        lower = np.clip((1.0 - r) / 0.45, 0.0, 1.0)
+        upper = np.clip((0.55 - r) / 0.55, 0.0, 1.0)
+        z = roof_h * np.clip(0.22 + 0.42 * lower + 0.36 * upper, 0.0, 1.0)
+    elif roof_type_id == "arched":
+        arch = np.sqrt(np.maximum(0.0, 1.0 - (x / half_w) ** 2))
+        z = roof_h * np.clip(0.12 + 0.88 * arch, 0.0, 1.0)
+    elif roof_type_id == "shell":
+        x_n = np.clip(x / half_w, -1.0, 1.0)
+        y_n = np.clip(y / half_d, -1.0, 1.0)
+        saddle = 1.0 - 0.5 * (x_n**2 + y_n**2) + 0.30 * x_n * y_n
+        z = roof_h * np.clip(0.12 + 0.88 * saddle, 0.02, 1.0)
+    else:
+        # Flat roof with subtle roughness.
+        z = np.full(n_points, 0.03 * roof_h)
+
+    z += rng.normal(0.0, 0.008, size=n_points)
+    return np.column_stack((x, y, z))
 
 
 def _generate_tree_points(
@@ -1747,6 +1961,10 @@ def place_objects(
     artificial_zones: Sequence[Dict[str, object]],
     num_trees: int = 70,
     num_buildings: int = 14,
+    building_roof_type_ratios: Dict[str, float] | None = None,
+    building_floor_min: int = int(BUILDING_DEFAULTS["building_floor_min"]),
+    building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
+    building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
     num_structures: int = 10,
     num_vehicles: int = 24,
     vehicle_type_ratios: Dict[str, float] | None = None,
@@ -1811,22 +2029,70 @@ def place_objects(
     n_building_points = int(points_per_class.get(4, 0))
     if n_building_points > 0:
         n_buildings_eff = max(1, min(num_buildings, n_building_points))
-        points_per_building = _split_count_evenly(n_building_points, n_buildings_eff)
-        for n_pts in points_per_building:
-            width = float(rng.uniform(8.0, 20.0))
-            depth = float(rng.uniform(8.0, 18.0))
-            height = float(rng.uniform(7.0, 28.0))
+        points_per_building = _split_count_random(
+            n_building_points,
+            n_buildings_eff,
+            rng=rng,
+            min_per_chunk=20,
+        )
+        if building_roof_type_ratios is None:
+            random_weights = rng.dirichlet(
+                np.array([1.3, 2.0, 1.7, 1.1, 1.2, 2.3, 0.7, 1.0, 0.8], dtype=np.float64)
+            )
+            building_roof_type_ratios_eff = {
+                roof_type: float(random_weights[idx])
+                for idx, roof_type in enumerate(BUILDING_ROOF_TYPES)
+            }
+        else:
+            building_roof_type_ratios_eff = {
+                roof_type: float(building_roof_type_ratios.get(roof_type, 0.0))
+                for roof_type in BUILDING_ROOF_TYPES
+            }
+            if np.isclose(sum(building_roof_type_ratios_eff.values()), 0.0):
+                building_roof_type_ratios_eff = dict(DEFAULT_BUILDING_ROOF_TYPE_RATIOS)
 
-            # Keep buildings away from roads and other buildings.
+        per_roof_type = _split_count_by_weights(
+            n_buildings_eff,
+            [building_roof_type_ratios_eff[roof_type] for roof_type in BUILDING_ROOF_TYPES],
+        )
+        roof_types: List[str] = []
+        for roof_type, type_count in zip(BUILDING_ROOF_TYPES, per_roof_type):
+            roof_types.extend([roof_type] * int(type_count))
+        if len(roof_types) < n_buildings_eff:
+            roof_types.extend(["flat"] * (n_buildings_eff - len(roof_types)))
+        roof_types = roof_types[:n_buildings_eff]
+        rng.shuffle(roof_types)
+
+        floor_min = max(1, int(min(building_floor_min, building_floor_max)))
+        floor_max = max(floor_min, int(max(building_floor_min, building_floor_max)))
+        for n_pts, roof_type in zip(points_per_building, roof_types):
+            width = float(rng.uniform(8.0, 22.0))
+            depth = float(rng.uniform(8.0, 20.0))
+            floor_count = int(rng.integers(floor_min, floor_max + 1))
+            floor_height = float(rng.uniform(2.7, 3.5))
+            if building_random_yaw:
+                yaw = float(rng.uniform(0.0, 2.0 * np.pi))
+            else:
+                yaw = float(rng.choice([0.0, 0.5 * np.pi]))
+
+            cos_yaw = abs(float(np.cos(yaw)))
+            sin_yaw = abs(float(np.sin(yaw)))
+            bbox_w = cos_yaw * width + sin_yaw * depth
+            bbox_d = sin_yaw * width + cos_yaw * depth
+
+            # Keep buildings away from roads and from each other.
             forbidden = artificial_rects + [
-                (cx, cy, sx + 6.0, sy + 6.0) for cx, cy, sx, sy in building_rects
+                (bx, by, bsx + 6.0, bsy + 6.0) for bx, by, bsx, bsy in building_rects
             ]
             cx, cy = _sample_single_xy(
-                rng, area_size=area_size, forbidden_rects=forbidden, margin=0.2
+                rng,
+                area_size=area_size,
+                forbidden_rects=forbidden,
+                margin=0.2,
             )
             base_z = float(terrain_fn(np.array([cx]), np.array([cy]))[0] + 0.08)
 
-            building_rects.append((cx, cy, width, depth))
+            building_rects.append((cx, cy, bbox_w, bbox_d))
             cloud_parts.append(
                 _generate_building_points(
                     rng=rng,
@@ -1835,7 +2101,10 @@ def place_objects(
                     cy=cy,
                     width=width,
                     depth=depth,
-                    height=height,
+                    floor_count=floor_count,
+                    floor_height=floor_height,
+                    roof_type=roof_type,
+                    yaw=yaw,
                     base_z=base_z,
                 )
             )
@@ -2326,6 +2595,12 @@ def _print_scene_params(
     randomize_object_counts: bool,
     object_counts: Dict[str, int],
     class_ratios: Dict[int, float],
+    building_roof_type_ratios: Dict[str, float] | None,
+    building_count_overridden: bool,
+    building_roof_type_distribution_overridden: bool,
+    building_floor_min: int,
+    building_floor_max: int,
+    building_random_yaw: bool,
     vehicle_type_ratios: Dict[str, float],
     tree_crown_type_ratios: Dict[str, float] | None,
     tree_count_overridden: bool,
@@ -2367,6 +2642,14 @@ def _print_scene_params(
         for vehicle_type in VEHICLE_TYPES
     )
     print(f"Vehicle type distribution: {vehicle_distribution}")
+    if building_roof_type_distribution_overridden and building_roof_type_ratios is not None:
+        building_distribution = ", ".join(
+            f"{BUILDING_ROOF_TYPE_NAMES[roof_type]}={building_roof_type_ratios[roof_type] * 100.0:.1f}%"
+            for roof_type in BUILDING_ROOF_TYPES
+        )
+        print(f"Building roof type distribution: {building_distribution}")
+    else:
+        print("Building roof type distribution: random per scene")
     if tree_crown_type_distribution_overridden and tree_crown_type_ratios is not None:
         tree_distribution = ", ".join(
             f"{TREE_CROWN_TYPE_NAMES[crown_type]}={tree_crown_type_ratios[crown_type] * 100.0:.1f}%"
@@ -2375,10 +2658,17 @@ def _print_scene_params(
         print(f"Tree crown type distribution: {tree_distribution}")
     else:
         print("Tree crown type distribution: random per scene")
+    if building_count_overridden:
+        print("Building count mode: custom override")
     if tree_count_overridden:
         print("Tree count mode: custom override")
     if vehicle_count_overridden:
         print("Vehicle count mode: custom override")
+    print(
+        "Building modes: "
+        f"floors={int(building_floor_min)}..{int(building_floor_max)}, "
+        f"yaw={'random' if building_random_yaw else 'aligned'}"
+    )
     print(
         "High vegetation modes: "
         f"tree_crown_size={'random' if random_tree_crown_size else 'custom'}"
@@ -2438,6 +2728,11 @@ def _run_pipeline(
     tree_max_crown_diameter: float = HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
     tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
     tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+    building_count: int | None = None,
+    building_roof_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    building_floor_min: int = int(BUILDING_DEFAULTS["building_floor_min"]),
+    building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
+    building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     shrub_count: int | None = None,
@@ -2485,11 +2780,25 @@ def _run_pipeline(
         raise ValueError("`grass_patch_count` must be > 0 when provided.")
     if tree_count is not None and int(tree_count) <= 0:
         raise ValueError("`tree_count` must be > 0 when provided.")
+    if building_count is not None and int(building_count) <= 0:
+        raise ValueError("`building_count` must be > 0 when provided.")
+    floor_min = int(building_floor_min)
+    floor_max = int(building_floor_max)
+    if floor_min <= 0:
+        raise ValueError("`building_floor_min` must be >= 1.")
+    if floor_max < floor_min:
+        raise ValueError("`building_floor_max` must be >= `building_floor_min`.")
 
     # ----------------------------- Scene config -----------------------------
     area_size = (float(area_width), float(area_length))
     class_ratios = _class_ratios_from_percentages(class_percentages)
     vehicle_type_ratios = _vehicle_type_ratios_from_percentages(vehicle_type_percentages)
+    building_roof_type_distribution_overridden = building_roof_type_percentages is not None
+    building_roof_type_ratios = (
+        _building_roof_type_ratios_from_percentages(building_roof_type_percentages)
+        if building_roof_type_distribution_overridden
+        else None
+    )
     tree_crown_type_distribution_overridden = tree_crown_type_percentages is not None
     tree_crown_type_ratios = (
         _tree_crown_type_ratios_from_percentages(tree_crown_type_percentages)
@@ -2502,10 +2811,16 @@ def _run_pipeline(
         rng=scene_rng,
         randomize_counts=randomize_object_counts,
     )
+    building_count_overridden = building_count is not None
     tree_count_overridden = tree_count is not None
     vehicle_count_overridden = vehicle_count is not None
     shrub_count_overridden = shrub_count is not None
     grass_patch_count_overridden = grass_patch_count is not None
+    if building_count_overridden:
+        building_count_int = int(building_count)
+        if building_count_int <= 0:
+            raise ValueError("`building_count` must be > 0 when provided.")
+        object_counts["num_buildings"] = building_count_int
     if tree_count_overridden:
         tree_count_int = int(tree_count)
         if tree_count_int <= 0:
@@ -2529,6 +2844,12 @@ def _run_pipeline(
         randomize_object_counts=randomize_object_counts,
         object_counts=object_counts,
         class_ratios=class_ratios,
+        building_roof_type_ratios=building_roof_type_ratios,
+        building_count_overridden=building_count_overridden,
+        building_roof_type_distribution_overridden=building_roof_type_distribution_overridden,
+        building_floor_min=floor_min,
+        building_floor_max=floor_max,
+        building_random_yaw=bool(building_random_yaw),
         vehicle_type_ratios=vehicle_type_ratios,
         tree_crown_type_ratios=tree_crown_type_ratios,
         tree_count_overridden=tree_count_overridden,
@@ -2569,6 +2890,10 @@ def _run_pipeline(
         artificial_zones=artificial_zones,
         num_trees=num_trees,
         num_buildings=num_buildings,
+        building_roof_type_ratios=building_roof_type_ratios,
+        building_floor_min=floor_min,
+        building_floor_max=floor_max,
+        building_random_yaw=bool(building_random_yaw),
         num_structures=num_structures,
         num_vehicles=num_vehicles,
         vehicle_type_ratios=vehicle_type_ratios,
@@ -2637,6 +2962,11 @@ def generate_point_cloud(
     tree_max_crown_diameter: float = HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
     tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
     tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+    building_count: int | None = None,
+    building_roof_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    building_floor_min: int = int(BUILDING_DEFAULTS["building_floor_min"]),
+    building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
+    building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     shrub_count: int | None = None,
@@ -2658,6 +2988,9 @@ def generate_point_cloud(
       - optional custom number of tree instances
       - optional custom tree crown type percentages
       - optional custom high vegetation crown sizing controls
+      - optional custom number of building instances
+      - optional custom building roof type percentages
+      - configurable random building floor range and arbitrary Z-rotation
       - optional custom number of vehicle instances
       - optional custom vehicle type percentages [car, truck, bus]
       - optional custom low vegetation controls (shrubs + grass patches)
@@ -2680,6 +3013,11 @@ def generate_point_cloud(
         tree_max_crown_diameter=float(tree_max_crown_diameter),
         tree_max_crown_top_height=float(tree_max_crown_top_height),
         tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
+        building_count=building_count,
+        building_roof_type_percentages=building_roof_type_percentages,
+        building_floor_min=int(building_floor_min),
+        building_floor_max=int(building_floor_max),
+        building_random_yaw=bool(building_random_yaw),
         vehicle_count=vehicle_count,
         vehicle_type_percentages=vehicle_type_percentages,
         shrub_count=shrub_count,
@@ -2709,6 +3047,11 @@ def main(
     tree_max_crown_diameter: float = HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
     tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
     tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+    building_count: int | None = None,
+    building_roof_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    building_floor_min: int = int(BUILDING_DEFAULTS["building_floor_min"]),
+    building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
+    building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     shrub_count: int | None = None,
@@ -2731,6 +3074,7 @@ def main(
       - randomizes object counts based on area
       - uses default class distribution unless custom percentages are provided
       - uses default high-vegetation generation unless custom values are provided
+      - uses default building generation unless custom values are provided
       - uses default vehicle count and type distribution unless custom values are provided
       - uses default low-vegetation generation unless custom values are provided
       - prints stats
@@ -2754,6 +3098,11 @@ def main(
         tree_max_crown_diameter=float(tree_max_crown_diameter),
         tree_max_crown_top_height=float(tree_max_crown_top_height),
         tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
+        building_count=building_count,
+        building_roof_type_percentages=building_roof_type_percentages,
+        building_floor_min=int(building_floor_min),
+        building_floor_max=int(building_floor_max),
+        building_random_yaw=bool(building_random_yaw),
         vehicle_count=vehicle_count,
         vehicle_type_percentages=vehicle_type_percentages,
         shrub_count=shrub_count,
@@ -2866,6 +3215,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
         help="Custom tree minimum crown bottom height above ground in meters.",
+    )
+    parser.add_argument(
+        "--building-count",
+        type=int,
+        help="Optional custom number of generated buildings (class 4).",
+    )
+    parser.add_argument(
+        "--building-roof-type-percentages",
+        type=float,
+        nargs=len(BUILDING_ROOF_TYPES),
+        metavar="PCT",
+        help=(
+            "Optional building roof type shares in percent for "
+            "[single_slope gable hip tent mansard flat dome arched shell]. "
+            "Example: --building-roof-type-percentages 10 18 14 8 10 20 6 8 6"
+        ),
+    )
+    parser.add_argument(
+        "--building-floor-min",
+        type=int,
+        default=int(BUILDING_DEFAULTS["building_floor_min"]),
+        help="Minimum number of floors for random building generation.",
+    )
+    parser.add_argument(
+        "--building-floor-max",
+        type=int,
+        default=int(BUILDING_DEFAULTS["building_floor_max"]),
+        help="Maximum number of floors for random building generation.",
+    )
+    parser.add_argument(
+        "--building-random-yaw",
+        action=argparse.BooleanOptionalAction,
+        default=bool(BUILDING_DEFAULTS["building_random_yaw"]),
+        help="Enable arbitrary random building rotation around Z axis.",
     )
     parser.add_argument(
         "--vehicle-count",
@@ -2986,6 +3369,11 @@ def cli(argv: Sequence[str] | None = None) -> int:
         tree_max_crown_diameter=float(args.tree_max_crown_diameter),
         tree_max_crown_top_height=float(args.tree_max_crown_top_height),
         tree_min_crown_bottom_height=float(args.tree_min_crown_bottom_height),
+        building_count=args.building_count,
+        building_roof_type_percentages=args.building_roof_type_percentages,
+        building_floor_min=int(args.building_floor_min),
+        building_floor_max=int(args.building_floor_max),
+        building_random_yaw=bool(args.building_random_yaw),
         vehicle_count=args.vehicle_count,
         vehicle_type_percentages=args.vehicle_type_percentages,
         shrub_count=args.shrub_count,

@@ -688,6 +688,44 @@ FALLBACK_LOW_VEG_DEFAULTS: Dict[str, float] = {
     "grass_patch_max_size_y": 3.4,
     "grass_max_height": 0.65,
 }
+FALLBACK_BUILDING_ROOF_TYPES: Tuple[str, ...] = (
+    "single_slope",
+    "gable",
+    "hip",
+    "tent",
+    "mansard",
+    "flat",
+    "dome",
+    "arched",
+    "shell",
+)
+FALLBACK_BUILDING_ROOF_TYPE_NAMES: Dict[str, str] = {
+    "single_slope": "Single-slope",
+    "gable": "Gable",
+    "hip": "Hip",
+    "tent": "Tent",
+    "mansard": "Mansard",
+    "flat": "Flat",
+    "dome": "Dome",
+    "arched": "Arched",
+    "shell": "Shell",
+}
+FALLBACK_BUILDING_ROOF_TYPE_PERCENTAGES: Tuple[float, ...] = (
+    10.0,
+    18.0,
+    14.0,
+    8.0,
+    10.0,
+    20.0,
+    6.0,
+    8.0,
+    6.0,
+)
+FALLBACK_BUILDING_DEFAULTS: Dict[str, int | bool] = {
+    "building_floor_min": 2,
+    "building_floor_max": 9,
+    "building_random_yaw": True,
+}
 FALLBACK_TREE_CROWN_TYPES: Tuple[str, ...] = (
     "spherical",
     "pyramidal",
@@ -722,6 +760,13 @@ class SyntheticGenerationParams:
     randomize_object_counts: bool = True
     custom_class_distribution: bool = False
     class_percentages: Tuple[float, ...] = FALLBACK_CLASS_PERCENTAGES
+    custom_building_count: bool = False
+    building_count: int = 14
+    custom_building_roof_type_distribution: bool = False
+    building_roof_type_percentages: Tuple[float, ...] = FALLBACK_BUILDING_ROOF_TYPE_PERCENTAGES
+    building_floor_min: int = int(FALLBACK_BUILDING_DEFAULTS["building_floor_min"])
+    building_floor_max: int = int(FALLBACK_BUILDING_DEFAULTS["building_floor_max"])
+    building_random_yaw: bool = bool(FALLBACK_BUILDING_DEFAULTS["building_random_yaw"])
     custom_tree_count: bool = False
     tree_count: int = 70
     custom_tree_crown_type_distribution: bool = False
@@ -756,6 +801,9 @@ class SyntheticGenerationDialog(QDialog):
         default_params: Optional[SyntheticGenerationParams] = None,
         class_names: Optional[Dict[int, str]] = None,
         default_class_percentages: Optional[Sequence[float]] = None,
+        building_roof_type_names: Optional[Dict[str, str]] = None,
+        default_building_roof_type_percentages: Optional[Sequence[float]] = None,
+        building_defaults: Optional[Dict[str, int | bool]] = None,
         tree_crown_type_names: Optional[Dict[str, str]] = None,
         default_tree_crown_type_percentages: Optional[Sequence[float]] = None,
         high_veg_defaults: Optional[Dict[str, float]] = None,
@@ -780,6 +828,21 @@ class SyntheticGenerationDialog(QDialog):
             values=params.class_percentages,
             class_count=len(self._class_ids),
             fallback=fallback_percentages,
+        )
+        self._building_roof_type_names = self._normalize_building_roof_type_names(
+            building_roof_type_names
+        )
+        self._building_roof_types = list(FALLBACK_BUILDING_ROOF_TYPES)
+        self._building_defaults = self._normalize_building_defaults(building_defaults)
+        fallback_building_roof_percentages = self._normalize_percentages(
+            values=default_building_roof_type_percentages,
+            class_count=len(self._building_roof_types),
+            fallback=FALLBACK_BUILDING_ROOF_TYPE_PERCENTAGES,
+        )
+        initial_building_roof_percentages = self._normalize_percentages(
+            values=params.building_roof_type_percentages,
+            class_count=len(self._building_roof_types),
+            fallback=fallback_building_roof_percentages,
         )
         self._tree_crown_type_names = self._normalize_tree_crown_type_names(
             tree_crown_type_names
@@ -809,6 +872,15 @@ class SyntheticGenerationDialog(QDialog):
             class_count=len(self._vehicle_types),
             fallback=fallback_vehicle_percentages,
         )
+        default_floor_min = int(self._building_defaults["building_floor_min"])
+        default_floor_max = int(self._building_defaults["building_floor_max"])
+        initial_building_floor_min = max(1, int(params.building_floor_min))
+        initial_building_floor_max = max(initial_building_floor_min, int(params.building_floor_max))
+        if initial_building_floor_min <= 0:
+            initial_building_floor_min = max(1, default_floor_min)
+        if initial_building_floor_max < initial_building_floor_min:
+            initial_building_floor_max = max(initial_building_floor_min, default_floor_max)
+        initial_building_random_yaw = bool(params.building_random_yaw)
         initial_tree_max_crown_diameter = max(
             0.05,
             float(
@@ -930,6 +1002,52 @@ class SyntheticGenerationDialog(QDialog):
             self.class_percentage_spins[class_id] = spin
 
         self.class_distribution_sum_label = QLabel(self)
+        self.custom_building_count_check = QCheckBox("Use custom building count", self)
+        self.custom_building_count_check.setChecked(bool(params.custom_building_count))
+        self.custom_building_count_check.toggled.connect(self._update_building_state)
+
+        self.building_count_spin = QSpinBox(self)
+        self.building_count_spin.setRange(1, 1_000_000)
+        self.building_count_spin.setSingleStep(1)
+        self.building_count_spin.setValue(max(1, int(params.building_count)))
+
+        self.custom_building_roof_type_check = QCheckBox(
+            "Use custom building roof type distribution (%)",
+            self,
+        )
+        self.custom_building_roof_type_check.setChecked(
+            bool(params.custom_building_roof_type_distribution)
+        )
+        self.custom_building_roof_type_check.toggled.connect(self._update_building_state)
+
+        self.building_roof_type_percentage_spins: Dict[str, QDoubleSpinBox] = {}
+        for idx, roof_type in enumerate(self._building_roof_types):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" %")
+            spin.setValue(float(initial_building_roof_percentages[idx]))
+            spin.valueChanged.connect(self._update_building_distribution_summary)
+            self.building_roof_type_percentage_spins[roof_type] = spin
+
+        self.building_roof_distribution_sum_label = QLabel(self)
+        self.building_floor_min_spin = QSpinBox(self)
+        self.building_floor_min_spin.setRange(1, 120)
+        self.building_floor_min_spin.setSingleStep(1)
+        self.building_floor_min_spin.setValue(initial_building_floor_min)
+        self.building_floor_min_spin.valueChanged.connect(self._update_building_state)
+
+        self.building_floor_max_spin = QSpinBox(self)
+        self.building_floor_max_spin.setRange(1, 120)
+        self.building_floor_max_spin.setSingleStep(1)
+        self.building_floor_max_spin.setValue(initial_building_floor_max)
+        self.building_floor_max_spin.valueChanged.connect(self._update_building_state)
+
+        self.building_random_yaw_check = QCheckBox("Arbitrary random Z rotation", self)
+        self.building_random_yaw_check.setChecked(initial_building_random_yaw)
+
+        self.building_validation_label = QLabel(self)
         self.custom_tree_count_check = QCheckBox("Use custom tree count", self)
         self.custom_tree_count_check.setChecked(bool(params.custom_tree_count))
         self.custom_tree_count_check.toggled.connect(self._update_high_vegetation_state)
@@ -1107,6 +1225,21 @@ class SyntheticGenerationDialog(QDialog):
             )
         form_general.addRow("Class sum:", self.class_distribution_sum_label)
 
+        form_building = QFormLayout()
+        form_building.addRow("", self.custom_building_count_check)
+        form_building.addRow("Building instances:", self.building_count_spin)
+        form_building.addRow("", self.custom_building_roof_type_check)
+        for roof_type in self._building_roof_types:
+            form_building.addRow(
+                f"{self._building_roof_type_names[roof_type]}:",
+                self.building_roof_type_percentage_spins[roof_type],
+            )
+        form_building.addRow("Type sum:", self.building_roof_distribution_sum_label)
+        form_building.addRow("Min building floors:", self.building_floor_min_spin)
+        form_building.addRow("Max building floors:", self.building_floor_max_spin)
+        form_building.addRow("", self.building_random_yaw_check)
+        form_building.addRow("Validation:", self.building_validation_label)
+
         form_high_veg = QFormLayout()
         form_high_veg.addRow("", self.custom_tree_count_check)
         form_high_veg.addRow("Tree instances:", self.tree_count_spin)
@@ -1159,6 +1292,12 @@ class SyntheticGenerationDialog(QDialog):
         general_layout.addStretch(1)
         tabs.addTab(general_tab, "General")
 
+        building_tab = QWidget(self)
+        building_layout = QVBoxLayout(building_tab)
+        building_layout.addLayout(form_building)
+        building_layout.addStretch(1)
+        tabs.addTab(building_tab, "Buildings")
+
         high_veg_tab = QWidget(self)
         high_veg_layout = QVBoxLayout(high_veg_tab)
         high_veg_layout.addLayout(form_high_veg)
@@ -1198,10 +1337,12 @@ class SyntheticGenerationDialog(QDialog):
         self.setLayout(layout)
 
         self._update_class_distribution_state()
+        self._update_building_state()
         self._update_high_vegetation_state()
         self._update_vehicle_settings_state()
         self._update_low_vegetation_state()
         self._update_class_distribution_summary()
+        self._update_building_distribution_summary()
         self._update_tree_crown_distribution_summary()
         self._update_vehicle_distribution_summary()
 
@@ -1221,6 +1362,53 @@ class SyntheticGenerationDialog(QDialog):
         if not normalized:
             return dict(FALLBACK_SYNTHETIC_CLASS_NAMES)
         return {class_id: normalized[class_id] for class_id in sorted(normalized)}
+
+    @staticmethod
+    def _normalize_building_roof_type_names(
+        building_roof_type_names: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        source = building_roof_type_names if isinstance(building_roof_type_names, dict) else {}
+        for roof_type in FALLBACK_BUILDING_ROOF_TYPES:
+            label = source.get(roof_type)
+            if label is None:
+                label = FALLBACK_BUILDING_ROOF_TYPE_NAMES[roof_type]
+            out[roof_type] = str(label)
+        return out
+
+    @staticmethod
+    def _normalize_building_defaults(
+        building_defaults: Optional[Dict[str, int | bool]],
+    ) -> Dict[str, int | bool]:
+        out: Dict[str, int | bool] = dict(FALLBACK_BUILDING_DEFAULTS)
+        if not isinstance(building_defaults, dict):
+            return out
+
+        floor_min = building_defaults.get("building_floor_min")
+        floor_max = building_defaults.get("building_floor_max")
+        if floor_min is not None:
+            try:
+                floor_min_i = int(floor_min)
+                if floor_min_i >= 1:
+                    out["building_floor_min"] = floor_min_i
+            except (TypeError, ValueError):
+                pass
+        if floor_max is not None:
+            try:
+                floor_max_i = int(floor_max)
+                if floor_max_i >= 1:
+                    out["building_floor_max"] = floor_max_i
+            except (TypeError, ValueError):
+                pass
+
+        if int(out["building_floor_max"]) < int(out["building_floor_min"]):
+            out["building_floor_max"] = int(out["building_floor_min"])
+
+        yaw_value = building_defaults.get("building_random_yaw")
+        if yaw_value is not None:
+            out["building_random_yaw"] = bool(yaw_value)
+
+        return out
 
     @staticmethod
     def _normalize_tree_crown_type_names(
@@ -1330,6 +1518,12 @@ class SyntheticGenerationDialog(QDialog):
             for class_id in self._class_ids
         )
 
+    def _current_building_roof_type_percentages(self) -> Tuple[float, ...]:
+        return tuple(
+            float(self.building_roof_type_percentage_spins[roof_type].value())
+            for roof_type in self._building_roof_types
+        )
+
     def _current_tree_crown_type_percentages(self) -> Tuple[float, ...]:
         return tuple(
             float(self.tree_crown_type_percentage_spins[crown_type].value())
@@ -1347,6 +1541,15 @@ class SyntheticGenerationDialog(QDialog):
             return True
 
         percentages = np.asarray(self._current_class_percentages(), dtype=np.float64)
+        total = float(percentages.sum())
+        has_positive = bool(np.any(percentages > 0.0))
+        return has_positive and abs(total - 100.0) <= 0.01
+
+    def _is_building_roof_distribution_valid(self) -> bool:
+        if not self.custom_building_roof_type_check.isChecked():
+            return True
+
+        percentages = np.asarray(self._current_building_roof_type_percentages(), dtype=np.float64)
         total = float(percentages.sum())
         has_positive = bool(np.any(percentages > 0.0))
         return has_positive and abs(total - 100.0) <= 0.01
@@ -1369,6 +1572,15 @@ class SyntheticGenerationDialog(QDialog):
         has_positive = bool(np.any(percentages > 0.0))
         return has_positive and abs(total - 100.0) <= 0.01
 
+    def _building_validation_error(self) -> Optional[str]:
+        floor_min = int(self.building_floor_min_spin.value())
+        floor_max = int(self.building_floor_max_spin.value())
+        if floor_min <= 0:
+            return "Minimum building floors must be >= 1."
+        if floor_max < floor_min:
+            return "Maximum building floors must be greater or equal to minimum."
+        return None
+
     def _high_vegetation_validation_error(self) -> Optional[str]:
         tree_top = float(self.tree_max_crown_top_height_spin.value())
         tree_bottom = float(self.tree_min_crown_bottom_height_spin.value())
@@ -1388,6 +1600,23 @@ class SyntheticGenerationDialog(QDialog):
         for spin in self.class_percentage_spins.values():
             spin.setEnabled(enabled)
         self._update_class_distribution_summary()
+
+    def _update_building_state(self) -> None:
+        self.building_count_spin.setEnabled(bool(self.custom_building_count_check.isChecked()))
+        is_custom_distribution = bool(self.custom_building_roof_type_check.isChecked())
+        for spin in self.building_roof_type_percentage_spins.values():
+            spin.setEnabled(is_custom_distribution)
+
+        error = self._building_validation_error()
+        if error is None:
+            self.building_validation_label.setText("Valid")
+            self.building_validation_label.setStyleSheet("color: #1f7a1f;")
+        else:
+            self.building_validation_label.setText(error)
+            self.building_validation_label.setStyleSheet("color: #b00020;")
+
+        self._update_building_distribution_summary()
+        self._update_ok_button_state()
 
     def _update_high_vegetation_state(self) -> None:
         self.tree_count_spin.setEnabled(bool(self.custom_tree_count_check.isChecked()))
@@ -1462,6 +1691,28 @@ class SyntheticGenerationDialog(QDialog):
         self.class_distribution_sum_label.setStyleSheet(f"color: {color};")
         self._update_ok_button_state()
 
+    def _update_building_distribution_summary(self) -> None:
+        total = float(sum(self._current_building_roof_type_percentages()))
+        is_custom = bool(self.custom_building_roof_type_check.isChecked())
+        is_valid = self._is_building_roof_distribution_valid()
+
+        if not is_custom:
+            text = f"{total:.2f}% (custom disabled, random distribution will be used)"
+            color = "#666666"
+        elif is_valid:
+            text = f"{total:.2f}% (valid)"
+            color = "#1f7a1f"
+        elif total <= 0.0:
+            text = f"{total:.2f}% (invalid: at least one type must be > 0)"
+            color = "#b00020"
+        else:
+            text = f"{total:.2f}% (invalid: must equal 100.00%)"
+            color = "#b00020"
+
+        self.building_roof_distribution_sum_label.setText(text)
+        self.building_roof_distribution_sum_label.setStyleSheet(f"color: {color};")
+        self._update_ok_button_state()
+
     def _update_tree_crown_distribution_summary(self) -> None:
         total = float(sum(self._current_tree_crown_type_percentages()))
         is_custom = bool(self.custom_tree_crown_type_check.isChecked())
@@ -1511,8 +1762,10 @@ class SyntheticGenerationDialog(QDialog):
             return
         self.ok_button.setEnabled(
             self._is_class_distribution_valid()
+            and self._is_building_roof_distribution_valid()
             and self._is_tree_crown_distribution_valid()
             and self._is_vehicle_distribution_valid()
+            and self._building_validation_error() is None
             and self._high_vegetation_validation_error() is None
             and self._low_vegetation_validation_error() is None
         )
@@ -1523,6 +1776,10 @@ class SyntheticGenerationDialog(QDialog):
             errors.append(
                 "When custom class distribution is enabled, class percentages must sum to 100%."
             )
+        if not self._is_building_roof_distribution_valid():
+            errors.append(
+                "When custom building roof type distribution is enabled, percentages must sum to 100%."
+            )
         if not self._is_tree_crown_distribution_valid():
             errors.append(
                 "When custom tree crown type distribution is enabled, percentages must sum to 100%."
@@ -1531,6 +1788,9 @@ class SyntheticGenerationDialog(QDialog):
             errors.append(
                 "When custom vehicle type distribution is enabled, vehicle type percentages must sum to 100%."
             )
+        building_error = self._building_validation_error()
+        if building_error is not None:
+            errors.append(building_error)
         high_veg_error = self._high_vegetation_validation_error()
         if high_veg_error is not None:
             errors.append(high_veg_error)
@@ -1557,6 +1817,15 @@ class SyntheticGenerationDialog(QDialog):
             randomize_object_counts=bool(self.random_counts_check.isChecked()),
             custom_class_distribution=bool(self.custom_distribution_check.isChecked()),
             class_percentages=self._current_class_percentages(),
+            custom_building_count=bool(self.custom_building_count_check.isChecked()),
+            building_count=int(self.building_count_spin.value()),
+            custom_building_roof_type_distribution=bool(
+                self.custom_building_roof_type_check.isChecked()
+            ),
+            building_roof_type_percentages=self._current_building_roof_type_percentages(),
+            building_floor_min=int(self.building_floor_min_spin.value()),
+            building_floor_max=int(self.building_floor_max_spin.value()),
+            building_random_yaw=bool(self.building_random_yaw_check.isChecked()),
             custom_tree_count=bool(self.custom_tree_count_check.isChecked()),
             tree_count=int(self.tree_count_spin.value()),
             custom_tree_crown_type_distribution=bool(self.custom_tree_crown_type_check.isChecked()),
@@ -2469,6 +2738,24 @@ class MainWindow(QMainWindow):
                     float(default_class_ratios[class_id]) * 100.0
                     for class_id in sorted(default_class_ratios)
                 )
+        building_roof_type_names = getattr(synthetic_module, "BUILDING_ROOF_TYPE_NAMES", None)
+        default_building_roof_type_percentages = getattr(
+            synthetic_module,
+            "DEFAULT_BUILDING_ROOF_TYPE_PERCENTAGES",
+            None,
+        )
+        if default_building_roof_type_percentages is None:
+            default_building_roof_type_ratios = getattr(
+                synthetic_module,
+                "DEFAULT_BUILDING_ROOF_TYPE_RATIOS",
+                None,
+            )
+            if isinstance(default_building_roof_type_ratios, dict):
+                default_building_roof_type_percentages = tuple(
+                    float(default_building_roof_type_ratios.get(key, 0.0)) * 100.0
+                    for key in FALLBACK_BUILDING_ROOF_TYPES
+                )
+        building_defaults = getattr(synthetic_module, "BUILDING_DEFAULTS", None)
         tree_crown_type_names = getattr(synthetic_module, "TREE_CROWN_TYPE_NAMES", None)
         default_tree_crown_type_percentages = getattr(
             synthetic_module,
@@ -2511,6 +2798,11 @@ class MainWindow(QMainWindow):
             default_params=self._last_generation_params,
             class_names=class_names if isinstance(class_names, dict) else None,
             default_class_percentages=default_class_percentages,
+            building_roof_type_names=(
+                building_roof_type_names if isinstance(building_roof_type_names, dict) else None
+            ),
+            default_building_roof_type_percentages=default_building_roof_type_percentages,
+            building_defaults=building_defaults if isinstance(building_defaults, dict) else None,
             tree_crown_type_names=(
                 tree_crown_type_names if isinstance(tree_crown_type_names, dict) else None
             ),
@@ -2539,6 +2831,19 @@ class MainWindow(QMainWindow):
                     if params.custom_class_distribution
                     else None
                 ),
+                building_count=(
+                    params.building_count
+                    if params.custom_building_count
+                    else None
+                ),
+                building_roof_type_percentages=(
+                    params.building_roof_type_percentages
+                    if params.custom_building_roof_type_distribution
+                    else None
+                ),
+                building_floor_min=int(params.building_floor_min),
+                building_floor_max=int(params.building_floor_max),
+                building_random_yaw=bool(params.building_random_yaw),
                 tree_count=(
                     params.tree_count
                     if params.custom_tree_count
