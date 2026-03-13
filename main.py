@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from OpenGL.GL import (
@@ -59,10 +59,12 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QOpenGLWidget,
+    QTabWidget,
     QSpinBox,
     QStyle,
     QToolBar,
     QVBoxLayout,
+    QWidget,
 )
 
 DEFAULT_MAX_POINTS = 2_000_000
@@ -660,6 +662,56 @@ class PointCloudLoader:
         return np.clip(rgb, 0.0, 1.0).astype(np.float32, copy=False)
 
 
+FALLBACK_SYNTHETIC_CLASS_NAMES: Dict[int, str] = {
+    0: "Natural surface",
+    1: "Artificial surface",
+    2: "Low vegetation",
+    3: "High vegetation",
+    4: "Buildings",
+    5: "Structures",
+    6: "Vehicles",
+    7: "Artifacts",
+}
+FALLBACK_CLASS_PERCENTAGES: Tuple[float, ...] = (38.0, 13.0, 16.0, 14.0, 10.0, 4.0, 3.0, 2.0)
+FALLBACK_VEHICLE_TYPES: Tuple[str, ...] = ("car", "truck", "bus")
+FALLBACK_VEHICLE_TYPE_NAMES: Dict[str, str] = {
+    "car": "Passenger car",
+    "truck": "Truck",
+    "bus": "Bus",
+}
+FALLBACK_VEHICLE_TYPE_PERCENTAGES: Tuple[float, ...] = (72.0, 18.0, 10.0)
+FALLBACK_LOW_VEG_DEFAULTS: Dict[str, float] = {
+    "shrub_max_diameter": 2.6,
+    "shrub_max_top_height": 1.8,
+    "shrub_min_bottom_height": 0.12,
+    "grass_patch_max_size_x": 3.8,
+    "grass_patch_max_size_y": 3.4,
+    "grass_max_height": 0.65,
+}
+FALLBACK_TREE_CROWN_TYPES: Tuple[str, ...] = (
+    "spherical",
+    "pyramidal",
+    "spreading",
+    "weeping",
+    "columnar",
+    "umbrella",
+)
+FALLBACK_TREE_CROWN_TYPE_NAMES: Dict[str, str] = {
+    "spherical": "Spherical",
+    "pyramidal": "Pyramidal",
+    "spreading": "Spreading",
+    "weeping": "Weeping",
+    "columnar": "Columnar",
+    "umbrella": "Umbrella",
+}
+FALLBACK_TREE_CROWN_TYPE_PERCENTAGES: Tuple[float, ...] = (28.0, 18.0, 20.0, 10.0, 12.0, 12.0)
+FALLBACK_HIGH_VEG_DEFAULTS: Dict[str, float] = {
+    "tree_max_crown_diameter": 5.2,
+    "tree_max_crown_top_height": 9.5,
+    "tree_min_crown_bottom_height": 1.3,
+}
+
+
 @dataclass
 class SyntheticGenerationParams:
     total_points: int = 100_000
@@ -668,12 +720,48 @@ class SyntheticGenerationParams:
     terrain_relief: float = 1.0
     seed: int = 12
     randomize_object_counts: bool = True
+    custom_class_distribution: bool = False
+    class_percentages: Tuple[float, ...] = FALLBACK_CLASS_PERCENTAGES
+    custom_tree_count: bool = False
+    tree_count: int = 70
+    custom_tree_crown_type_distribution: bool = False
+    tree_crown_type_percentages: Tuple[float, ...] = FALLBACK_TREE_CROWN_TYPE_PERCENTAGES
+    random_tree_crown_size: bool = True
+    tree_max_crown_diameter: float = FALLBACK_HIGH_VEG_DEFAULTS["tree_max_crown_diameter"]
+    tree_max_crown_top_height: float = FALLBACK_HIGH_VEG_DEFAULTS["tree_max_crown_top_height"]
+    tree_min_crown_bottom_height: float = FALLBACK_HIGH_VEG_DEFAULTS[
+        "tree_min_crown_bottom_height"
+    ]
+    custom_vehicle_count: bool = False
+    vehicle_count: int = 24
+    custom_vehicle_type_distribution: bool = False
+    vehicle_type_percentages: Tuple[float, ...] = FALLBACK_VEHICLE_TYPE_PERCENTAGES
+    custom_shrub_count: bool = False
+    shrub_count: int = 24
+    random_shrub_size: bool = True
+    shrub_max_diameter: float = FALLBACK_LOW_VEG_DEFAULTS["shrub_max_diameter"]
+    shrub_max_top_height: float = FALLBACK_LOW_VEG_DEFAULTS["shrub_max_top_height"]
+    shrub_min_bottom_height: float = FALLBACK_LOW_VEG_DEFAULTS["shrub_min_bottom_height"]
+    custom_grass_patch_count: bool = False
+    grass_patch_count: int = 18
+    random_grass_patch_size: bool = True
+    grass_patch_max_size_x: float = FALLBACK_LOW_VEG_DEFAULTS["grass_patch_max_size_x"]
+    grass_patch_max_size_y: float = FALLBACK_LOW_VEG_DEFAULTS["grass_patch_max_size_y"]
+    grass_max_height: float = FALLBACK_LOW_VEG_DEFAULTS["grass_max_height"]
 
 
 class SyntheticGenerationDialog(QDialog):
     def __init__(
         self,
         default_params: Optional[SyntheticGenerationParams] = None,
+        class_names: Optional[Dict[int, str]] = None,
+        default_class_percentages: Optional[Sequence[float]] = None,
+        tree_crown_type_names: Optional[Dict[str, str]] = None,
+        default_tree_crown_type_percentages: Optional[Sequence[float]] = None,
+        high_veg_defaults: Optional[Dict[str, float]] = None,
+        vehicle_type_names: Optional[Dict[str, str]] = None,
+        default_vehicle_type_percentages: Optional[Sequence[float]] = None,
+        low_veg_defaults: Optional[Dict[str, float]] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -681,6 +769,118 @@ class SyntheticGenerationDialog(QDialog):
         self.setModal(True)
 
         params = default_params or SyntheticGenerationParams()
+        self._class_names = self._normalize_class_names(class_names)
+        self._class_ids = sorted(self._class_names)
+        fallback_percentages = self._normalize_percentages(
+            values=default_class_percentages,
+            class_count=len(self._class_ids),
+            fallback=FALLBACK_CLASS_PERCENTAGES,
+        )
+        initial_percentages = self._normalize_percentages(
+            values=params.class_percentages,
+            class_count=len(self._class_ids),
+            fallback=fallback_percentages,
+        )
+        self._tree_crown_type_names = self._normalize_tree_crown_type_names(
+            tree_crown_type_names
+        )
+        self._tree_crown_types = list(FALLBACK_TREE_CROWN_TYPES)
+        self._high_veg_defaults = self._normalize_high_veg_defaults(high_veg_defaults)
+        fallback_tree_crown_percentages = self._normalize_percentages(
+            values=default_tree_crown_type_percentages,
+            class_count=len(self._tree_crown_types),
+            fallback=FALLBACK_TREE_CROWN_TYPE_PERCENTAGES,
+        )
+        initial_tree_crown_percentages = self._normalize_percentages(
+            values=params.tree_crown_type_percentages,
+            class_count=len(self._tree_crown_types),
+            fallback=fallback_tree_crown_percentages,
+        )
+        self._vehicle_type_names = self._normalize_vehicle_type_names(vehicle_type_names)
+        self._vehicle_types = list(FALLBACK_VEHICLE_TYPES)
+        self._low_veg_defaults = self._normalize_low_veg_defaults(low_veg_defaults)
+        fallback_vehicle_percentages = self._normalize_percentages(
+            values=default_vehicle_type_percentages,
+            class_count=len(self._vehicle_types),
+            fallback=FALLBACK_VEHICLE_TYPE_PERCENTAGES,
+        )
+        initial_vehicle_percentages = self._normalize_percentages(
+            values=params.vehicle_type_percentages,
+            class_count=len(self._vehicle_types),
+            fallback=fallback_vehicle_percentages,
+        )
+        initial_tree_max_crown_diameter = max(
+            0.05,
+            float(
+                params.tree_max_crown_diameter
+                if params.tree_max_crown_diameter > 0.0
+                else self._high_veg_defaults["tree_max_crown_diameter"]
+            ),
+        )
+        initial_tree_max_crown_top_height = max(
+            0.05,
+            float(
+                params.tree_max_crown_top_height
+                if params.tree_max_crown_top_height > 0.0
+                else self._high_veg_defaults["tree_max_crown_top_height"]
+            ),
+        )
+        initial_tree_min_crown_bottom_height = max(
+            0.0,
+            float(
+                params.tree_min_crown_bottom_height
+                if params.tree_min_crown_bottom_height >= 0.0
+                else self._high_veg_defaults["tree_min_crown_bottom_height"]
+            ),
+        )
+        initial_shrub_max_diameter = max(
+            0.05,
+            float(
+                params.shrub_max_diameter
+                if params.shrub_max_diameter > 0.0
+                else self._low_veg_defaults["shrub_max_diameter"]
+            ),
+        )
+        initial_shrub_max_top_height = max(
+            0.05,
+            float(
+                params.shrub_max_top_height
+                if params.shrub_max_top_height > 0.0
+                else self._low_veg_defaults["shrub_max_top_height"]
+            ),
+        )
+        initial_shrub_min_bottom_height = max(
+            0.0,
+            float(
+                params.shrub_min_bottom_height
+                if params.shrub_min_bottom_height >= 0.0
+                else self._low_veg_defaults["shrub_min_bottom_height"]
+            ),
+        )
+        initial_grass_patch_max_size_x = max(
+            0.05,
+            float(
+                params.grass_patch_max_size_x
+                if params.grass_patch_max_size_x > 0.0
+                else self._low_veg_defaults["grass_patch_max_size_x"]
+            ),
+        )
+        initial_grass_patch_max_size_y = max(
+            0.05,
+            float(
+                params.grass_patch_max_size_y
+                if params.grass_patch_max_size_y > 0.0
+                else self._low_veg_defaults["grass_patch_max_size_y"]
+            ),
+        )
+        initial_grass_max_height = max(
+            0.05,
+            float(
+                params.grass_max_height
+                if params.grass_max_height > 0.0
+                else self._low_veg_defaults["grass_max_height"]
+            ),
+        )
 
         self.total_points_spin = QSpinBox(self)
         self.total_points_spin.setRange(1_000, 50_000_000)
@@ -714,26 +914,638 @@ class SyntheticGenerationDialog(QDialog):
         self.random_counts_check = QCheckBox("Randomize object counts", self)
         self.random_counts_check.setChecked(bool(params.randomize_object_counts))
 
-        form = QFormLayout()
-        form.addRow("Total points:", self.total_points_spin)
-        form.addRow("Area width:", self.area_width_spin)
-        form.addRow("Area length:", self.area_length_spin)
-        form.addRow("Terrain relief [0..1]:", self.terrain_relief_spin)
-        form.addRow("Random seed:", self.seed_spin)
-        form.addRow("", self.random_counts_check)
+        self.custom_distribution_check = QCheckBox("Use custom class distribution (%)", self)
+        self.custom_distribution_check.setChecked(bool(params.custom_class_distribution))
+        self.custom_distribution_check.toggled.connect(self._update_class_distribution_state)
 
-        note = QLabel("Generation uses synthetic_labeled_point_cloud.py pipeline.", self)
+        self.class_percentage_spins: Dict[int, QDoubleSpinBox] = {}
+        for idx, class_id in enumerate(self._class_ids):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" %")
+            spin.setValue(float(initial_percentages[idx]))
+            spin.valueChanged.connect(self._update_class_distribution_summary)
+            self.class_percentage_spins[class_id] = spin
+
+        self.class_distribution_sum_label = QLabel(self)
+        self.custom_tree_count_check = QCheckBox("Use custom tree count", self)
+        self.custom_tree_count_check.setChecked(bool(params.custom_tree_count))
+        self.custom_tree_count_check.toggled.connect(self._update_high_vegetation_state)
+
+        self.tree_count_spin = QSpinBox(self)
+        self.tree_count_spin.setRange(1, 1_000_000)
+        self.tree_count_spin.setSingleStep(1)
+        self.tree_count_spin.setValue(max(1, int(params.tree_count)))
+
+        self.custom_tree_crown_type_check = QCheckBox(
+            "Use custom tree crown type distribution (%)",
+            self,
+        )
+        self.custom_tree_crown_type_check.setChecked(bool(params.custom_tree_crown_type_distribution))
+        self.custom_tree_crown_type_check.toggled.connect(self._update_high_vegetation_state)
+
+        self.tree_crown_type_percentage_spins: Dict[str, QDoubleSpinBox] = {}
+        for idx, crown_type in enumerate(self._tree_crown_types):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" %")
+            spin.setValue(float(initial_tree_crown_percentages[idx]))
+            spin.valueChanged.connect(self._update_tree_crown_distribution_summary)
+            self.tree_crown_type_percentage_spins[crown_type] = spin
+
+        self.tree_crown_distribution_sum_label = QLabel(self)
+        self.random_tree_crown_size_check = QCheckBox("Random tree crown size", self)
+        self.random_tree_crown_size_check.setChecked(bool(params.random_tree_crown_size))
+        self.random_tree_crown_size_check.toggled.connect(self._update_high_vegetation_state)
+
+        self.tree_max_crown_diameter_spin = QDoubleSpinBox(self)
+        self.tree_max_crown_diameter_spin.setRange(0.05, 60.0)
+        self.tree_max_crown_diameter_spin.setDecimals(2)
+        self.tree_max_crown_diameter_spin.setSingleStep(0.1)
+        self.tree_max_crown_diameter_spin.setValue(initial_tree_max_crown_diameter)
+        self.tree_max_crown_diameter_spin.setSuffix(" m")
+        self.tree_max_crown_diameter_spin.valueChanged.connect(self._update_high_vegetation_state)
+
+        self.tree_max_crown_top_height_spin = QDoubleSpinBox(self)
+        self.tree_max_crown_top_height_spin.setRange(0.05, 80.0)
+        self.tree_max_crown_top_height_spin.setDecimals(2)
+        self.tree_max_crown_top_height_spin.setSingleStep(0.1)
+        self.tree_max_crown_top_height_spin.setValue(initial_tree_max_crown_top_height)
+        self.tree_max_crown_top_height_spin.setSuffix(" m")
+        self.tree_max_crown_top_height_spin.valueChanged.connect(
+            self._update_high_vegetation_state
+        )
+
+        self.tree_min_crown_bottom_height_spin = QDoubleSpinBox(self)
+        self.tree_min_crown_bottom_height_spin.setRange(0.0, 80.0)
+        self.tree_min_crown_bottom_height_spin.setDecimals(2)
+        self.tree_min_crown_bottom_height_spin.setSingleStep(0.1)
+        self.tree_min_crown_bottom_height_spin.setValue(initial_tree_min_crown_bottom_height)
+        self.tree_min_crown_bottom_height_spin.setSuffix(" m")
+        self.tree_min_crown_bottom_height_spin.valueChanged.connect(
+            self._update_high_vegetation_state
+        )
+
+        self.high_vegetation_validation_label = QLabel(self)
+        self.custom_vehicle_count_check = QCheckBox("Use custom vehicle count", self)
+        self.custom_vehicle_count_check.setChecked(bool(params.custom_vehicle_count))
+        self.custom_vehicle_count_check.toggled.connect(self._update_vehicle_settings_state)
+
+        self.vehicle_count_spin = QSpinBox(self)
+        self.vehicle_count_spin.setRange(1, 1_000_000)
+        self.vehicle_count_spin.setSingleStep(1)
+        self.vehicle_count_spin.setValue(max(1, int(params.vehicle_count)))
+
+        self.custom_vehicle_type_check = QCheckBox("Use custom vehicle type distribution (%)", self)
+        self.custom_vehicle_type_check.setChecked(bool(params.custom_vehicle_type_distribution))
+        self.custom_vehicle_type_check.toggled.connect(self._update_vehicle_settings_state)
+
+        self.vehicle_type_percentage_spins: Dict[str, QDoubleSpinBox] = {}
+        for idx, vehicle_type in enumerate(self._vehicle_types):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" %")
+            spin.setValue(float(initial_vehicle_percentages[idx]))
+            spin.valueChanged.connect(self._update_vehicle_distribution_summary)
+            self.vehicle_type_percentage_spins[vehicle_type] = spin
+
+        self.vehicle_distribution_sum_label = QLabel(self)
+        self.custom_shrub_count_check = QCheckBox("Use custom shrub count", self)
+        self.custom_shrub_count_check.setChecked(bool(params.custom_shrub_count))
+        self.custom_shrub_count_check.toggled.connect(self._update_low_vegetation_state)
+
+        self.shrub_count_spin = QSpinBox(self)
+        self.shrub_count_spin.setRange(1, 1_000_000)
+        self.shrub_count_spin.setSingleStep(1)
+        self.shrub_count_spin.setValue(max(1, int(params.shrub_count)))
+
+        self.random_shrub_size_check = QCheckBox("Random shrub size", self)
+        self.random_shrub_size_check.setChecked(bool(params.random_shrub_size))
+        self.random_shrub_size_check.toggled.connect(self._update_low_vegetation_state)
+
+        self.shrub_max_diameter_spin = QDoubleSpinBox(self)
+        self.shrub_max_diameter_spin.setRange(0.05, 20.0)
+        self.shrub_max_diameter_spin.setDecimals(2)
+        self.shrub_max_diameter_spin.setSingleStep(0.1)
+        self.shrub_max_diameter_spin.setValue(initial_shrub_max_diameter)
+        self.shrub_max_diameter_spin.setSuffix(" m")
+        self.shrub_max_diameter_spin.valueChanged.connect(self._update_low_vegetation_state)
+
+        self.shrub_max_top_height_spin = QDoubleSpinBox(self)
+        self.shrub_max_top_height_spin.setRange(0.05, 20.0)
+        self.shrub_max_top_height_spin.setDecimals(2)
+        self.shrub_max_top_height_spin.setSingleStep(0.05)
+        self.shrub_max_top_height_spin.setValue(initial_shrub_max_top_height)
+        self.shrub_max_top_height_spin.setSuffix(" m")
+        self.shrub_max_top_height_spin.valueChanged.connect(self._update_low_vegetation_state)
+
+        self.shrub_min_bottom_height_spin = QDoubleSpinBox(self)
+        self.shrub_min_bottom_height_spin.setRange(0.0, 20.0)
+        self.shrub_min_bottom_height_spin.setDecimals(2)
+        self.shrub_min_bottom_height_spin.setSingleStep(0.05)
+        self.shrub_min_bottom_height_spin.setValue(initial_shrub_min_bottom_height)
+        self.shrub_min_bottom_height_spin.setSuffix(" m")
+        self.shrub_min_bottom_height_spin.valueChanged.connect(self._update_low_vegetation_state)
+
+        self.custom_grass_patch_count_check = QCheckBox("Use custom grass patch count", self)
+        self.custom_grass_patch_count_check.setChecked(bool(params.custom_grass_patch_count))
+        self.custom_grass_patch_count_check.toggled.connect(self._update_low_vegetation_state)
+
+        self.grass_patch_count_spin = QSpinBox(self)
+        self.grass_patch_count_spin.setRange(1, 1_000_000)
+        self.grass_patch_count_spin.setSingleStep(1)
+        self.grass_patch_count_spin.setValue(max(1, int(params.grass_patch_count)))
+
+        self.random_grass_patch_size_check = QCheckBox("Random grass patch size", self)
+        self.random_grass_patch_size_check.setChecked(bool(params.random_grass_patch_size))
+        self.random_grass_patch_size_check.toggled.connect(self._update_low_vegetation_state)
+
+        self.grass_patch_max_size_x_spin = QDoubleSpinBox(self)
+        self.grass_patch_max_size_x_spin.setRange(0.05, 50.0)
+        self.grass_patch_max_size_x_spin.setDecimals(2)
+        self.grass_patch_max_size_x_spin.setSingleStep(0.1)
+        self.grass_patch_max_size_x_spin.setValue(initial_grass_patch_max_size_x)
+        self.grass_patch_max_size_x_spin.setSuffix(" m")
+        self.grass_patch_max_size_x_spin.valueChanged.connect(self._update_low_vegetation_state)
+
+        self.grass_patch_max_size_y_spin = QDoubleSpinBox(self)
+        self.grass_patch_max_size_y_spin.setRange(0.05, 50.0)
+        self.grass_patch_max_size_y_spin.setDecimals(2)
+        self.grass_patch_max_size_y_spin.setSingleStep(0.1)
+        self.grass_patch_max_size_y_spin.setValue(initial_grass_patch_max_size_y)
+        self.grass_patch_max_size_y_spin.setSuffix(" m")
+        self.grass_patch_max_size_y_spin.valueChanged.connect(self._update_low_vegetation_state)
+
+        self.grass_max_height_spin = QDoubleSpinBox(self)
+        self.grass_max_height_spin.setRange(0.05, 10.0)
+        self.grass_max_height_spin.setDecimals(2)
+        self.grass_max_height_spin.setSingleStep(0.05)
+        self.grass_max_height_spin.setValue(initial_grass_max_height)
+        self.grass_max_height_spin.setSuffix(" m")
+        self.grass_max_height_spin.valueChanged.connect(self._update_low_vegetation_state)
+
+        self.low_vegetation_validation_label = QLabel(self)
+
+        form_general = QFormLayout()
+        form_general.addRow("Total points:", self.total_points_spin)
+        form_general.addRow("Area width:", self.area_width_spin)
+        form_general.addRow("Area length:", self.area_length_spin)
+        form_general.addRow("Terrain relief [0..1]:", self.terrain_relief_spin)
+        form_general.addRow("Random seed:", self.seed_spin)
+        form_general.addRow("", self.random_counts_check)
+        form_general.addRow("", self.custom_distribution_check)
+        for class_id in self._class_ids:
+            form_general.addRow(
+                f"Class {class_id} ({self._class_names[class_id]}):",
+                self.class_percentage_spins[class_id],
+            )
+        form_general.addRow("Class sum:", self.class_distribution_sum_label)
+
+        form_high_veg = QFormLayout()
+        form_high_veg.addRow("", self.custom_tree_count_check)
+        form_high_veg.addRow("Tree instances:", self.tree_count_spin)
+        form_high_veg.addRow("", self.custom_tree_crown_type_check)
+        for crown_type in self._tree_crown_types:
+            form_high_veg.addRow(
+                f"{self._tree_crown_type_names[crown_type]}:",
+                self.tree_crown_type_percentage_spins[crown_type],
+            )
+        form_high_veg.addRow("Type sum:", self.tree_crown_distribution_sum_label)
+        form_high_veg.addRow("", self.random_tree_crown_size_check)
+        form_high_veg.addRow("Max tree crown diameter:", self.tree_max_crown_diameter_spin)
+        form_high_veg.addRow("Max tree crown top height:", self.tree_max_crown_top_height_spin)
+        form_high_veg.addRow(
+            "Min tree crown bottom height:",
+            self.tree_min_crown_bottom_height_spin,
+        )
+        form_high_veg.addRow("Validation:", self.high_vegetation_validation_label)
+
+        form_vehicle = QFormLayout()
+        form_vehicle.addRow("", self.custom_vehicle_count_check)
+        form_vehicle.addRow("Vehicle instances:", self.vehicle_count_spin)
+        form_vehicle.addRow("", self.custom_vehicle_type_check)
+        for vehicle_type in self._vehicle_types:
+            form_vehicle.addRow(
+                f"{self._vehicle_type_names[vehicle_type]}:",
+                self.vehicle_type_percentage_spins[vehicle_type],
+            )
+        form_vehicle.addRow("Type sum:", self.vehicle_distribution_sum_label)
+
+        form_low_veg = QFormLayout()
+        form_low_veg.addRow("", self.custom_shrub_count_check)
+        form_low_veg.addRow("Shrub clusters:", self.shrub_count_spin)
+        form_low_veg.addRow("", self.random_shrub_size_check)
+        form_low_veg.addRow("Max shrub crown diameter:", self.shrub_max_diameter_spin)
+        form_low_veg.addRow("Max shrub top height:", self.shrub_max_top_height_spin)
+        form_low_veg.addRow("Min shrub crown bottom height:", self.shrub_min_bottom_height_spin)
+        form_low_veg.addRow("", self.custom_grass_patch_count_check)
+        form_low_veg.addRow("Grass patches:", self.grass_patch_count_spin)
+        form_low_veg.addRow("", self.random_grass_patch_size_check)
+        form_low_veg.addRow("Max grass patch size X:", self.grass_patch_max_size_x_spin)
+        form_low_veg.addRow("Max grass patch size Y:", self.grass_patch_max_size_y_spin)
+        form_low_veg.addRow("Max grass height:", self.grass_max_height_spin)
+        form_low_veg.addRow("Validation:", self.low_vegetation_validation_label)
+
+        tabs = QTabWidget(self)
+        general_tab = QWidget(self)
+        general_layout = QVBoxLayout(general_tab)
+        general_layout.addLayout(form_general)
+        general_layout.addStretch(1)
+        tabs.addTab(general_tab, "General")
+
+        high_veg_tab = QWidget(self)
+        high_veg_layout = QVBoxLayout(high_veg_tab)
+        high_veg_layout.addLayout(form_high_veg)
+        high_veg_layout.addStretch(1)
+        tabs.addTab(high_veg_tab, "High Vegetation")
+
+        vehicle_tab = QWidget(self)
+        vehicle_layout = QVBoxLayout(vehicle_tab)
+        vehicle_layout.addLayout(form_vehicle)
+        vehicle_layout.addStretch(1)
+        tabs.addTab(vehicle_tab, "Vehicles")
+
+        low_veg_tab = QWidget(self)
+        low_veg_layout = QVBoxLayout(low_veg_tab)
+        low_veg_layout.addLayout(form_low_veg)
+        low_veg_layout.addStretch(1)
+        tabs.addTab(low_veg_tab, "Low Vegetation")
+
+        note = QLabel(
+            (
+                "Generation uses synthetic_labeled_point_cloud.py pipeline. "
+                "When custom distributions are enabled, percentages must sum to 100%."
+            ),
+            self,
+        )
         note.setWordWrap(True)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(tabs)
         layout.addWidget(note)
         layout.addWidget(buttons)
         self.setLayout(layout)
+
+        self._update_class_distribution_state()
+        self._update_high_vegetation_state()
+        self._update_vehicle_settings_state()
+        self._update_low_vegetation_state()
+        self._update_class_distribution_summary()
+        self._update_tree_crown_distribution_summary()
+        self._update_vehicle_distribution_summary()
+
+    @staticmethod
+    def _normalize_class_names(class_names: Optional[Dict[int, str]]) -> Dict[int, str]:
+        if not isinstance(class_names, dict):
+            return dict(FALLBACK_SYNTHETIC_CLASS_NAMES)
+
+        normalized: Dict[int, str] = {}
+        for key, value in class_names.items():
+            try:
+                class_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            normalized[class_id] = str(value)
+
+        if not normalized:
+            return dict(FALLBACK_SYNTHETIC_CLASS_NAMES)
+        return {class_id: normalized[class_id] for class_id in sorted(normalized)}
+
+    @staticmethod
+    def _normalize_tree_crown_type_names(
+        tree_crown_type_names: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        source = tree_crown_type_names if isinstance(tree_crown_type_names, dict) else {}
+        for crown_type in FALLBACK_TREE_CROWN_TYPES:
+            label = source.get(crown_type)
+            if label is None:
+                label = FALLBACK_TREE_CROWN_TYPE_NAMES[crown_type]
+            out[crown_type] = str(label)
+        return out
+
+    @staticmethod
+    def _normalize_vehicle_type_names(
+        vehicle_type_names: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        source = vehicle_type_names if isinstance(vehicle_type_names, dict) else {}
+        for vehicle_type in FALLBACK_VEHICLE_TYPES:
+            label = source.get(vehicle_type)
+            if label is None:
+                label = FALLBACK_VEHICLE_TYPE_NAMES[vehicle_type]
+            out[vehicle_type] = str(label)
+        return out
+
+    @staticmethod
+    def _normalize_high_veg_defaults(
+        high_veg_defaults: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        out = dict(FALLBACK_HIGH_VEG_DEFAULTS)
+        if not isinstance(high_veg_defaults, dict):
+            return out
+
+        for key in out:
+            value = high_veg_defaults.get(key)
+            if value is None:
+                continue
+            try:
+                value_f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if key == "tree_min_crown_bottom_height":
+                if value_f < 0.0:
+                    continue
+            elif value_f <= 0.0:
+                continue
+            out[key] = value_f
+        return out
+
+    @staticmethod
+    def _normalize_low_veg_defaults(
+        low_veg_defaults: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        out = dict(FALLBACK_LOW_VEG_DEFAULTS)
+        if not isinstance(low_veg_defaults, dict):
+            return out
+
+        for key in out:
+            value = low_veg_defaults.get(key)
+            if value is None:
+                continue
+            try:
+                value_f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if key == "shrub_min_bottom_height":
+                if value_f < 0.0:
+                    continue
+            elif value_f <= 0.0:
+                continue
+            out[key] = value_f
+        return out
+
+    @staticmethod
+    def _normalize_percentages(
+        values: Optional[Sequence[float]],
+        class_count: int,
+        fallback: Sequence[float],
+    ) -> Tuple[float, ...]:
+        target_count = max(1, int(class_count))
+        fallback_values: List[float] = []
+        for idx in range(target_count):
+            fallback_values.append(float(fallback[idx]) if idx < len(fallback) else 0.0)
+
+        if values is None:
+            return tuple(fallback_values)
+
+        try:
+            normalized = [float(value) for value in values]
+        except (TypeError, ValueError):
+            return tuple(fallback_values)
+
+        if len(normalized) != target_count:
+            return tuple(fallback_values)
+
+        as_array = np.asarray(normalized, dtype=np.float64)
+        if np.any(~np.isfinite(as_array)) or np.any(as_array < 0.0):
+            return tuple(fallback_values)
+
+        return tuple(float(value) for value in normalized)
+
+    def _current_class_percentages(self) -> Tuple[float, ...]:
+        return tuple(
+            float(self.class_percentage_spins[class_id].value())
+            for class_id in self._class_ids
+        )
+
+    def _current_tree_crown_type_percentages(self) -> Tuple[float, ...]:
+        return tuple(
+            float(self.tree_crown_type_percentage_spins[crown_type].value())
+            for crown_type in self._tree_crown_types
+        )
+
+    def _current_vehicle_type_percentages(self) -> Tuple[float, ...]:
+        return tuple(
+            float(self.vehicle_type_percentage_spins[vehicle_type].value())
+            for vehicle_type in self._vehicle_types
+        )
+
+    def _is_class_distribution_valid(self) -> bool:
+        if not self.custom_distribution_check.isChecked():
+            return True
+
+        percentages = np.asarray(self._current_class_percentages(), dtype=np.float64)
+        total = float(percentages.sum())
+        has_positive = bool(np.any(percentages > 0.0))
+        return has_positive and abs(total - 100.0) <= 0.01
+
+    def _is_tree_crown_distribution_valid(self) -> bool:
+        if not self.custom_tree_crown_type_check.isChecked():
+            return True
+
+        percentages = np.asarray(self._current_tree_crown_type_percentages(), dtype=np.float64)
+        total = float(percentages.sum())
+        has_positive = bool(np.any(percentages > 0.0))
+        return has_positive and abs(total - 100.0) <= 0.01
+
+    def _is_vehicle_distribution_valid(self) -> bool:
+        if not self.custom_vehicle_type_check.isChecked():
+            return True
+
+        percentages = np.asarray(self._current_vehicle_type_percentages(), dtype=np.float64)
+        total = float(percentages.sum())
+        has_positive = bool(np.any(percentages > 0.0))
+        return has_positive and abs(total - 100.0) <= 0.01
+
+    def _high_vegetation_validation_error(self) -> Optional[str]:
+        tree_top = float(self.tree_max_crown_top_height_spin.value())
+        tree_bottom = float(self.tree_min_crown_bottom_height_spin.value())
+        if tree_bottom >= tree_top:
+            return "Tree min crown bottom height must be less than tree max crown top height."
+        return None
+
+    def _low_vegetation_validation_error(self) -> Optional[str]:
+        shrub_top = float(self.shrub_max_top_height_spin.value())
+        shrub_bottom = float(self.shrub_min_bottom_height_spin.value())
+        if shrub_bottom >= shrub_top:
+            return "Shrub min bottom height must be less than shrub max top height."
+        return None
+
+    def _update_class_distribution_state(self) -> None:
+        enabled = bool(self.custom_distribution_check.isChecked())
+        for spin in self.class_percentage_spins.values():
+            spin.setEnabled(enabled)
+        self._update_class_distribution_summary()
+
+    def _update_high_vegetation_state(self) -> None:
+        self.tree_count_spin.setEnabled(bool(self.custom_tree_count_check.isChecked()))
+        is_custom_distribution = bool(self.custom_tree_crown_type_check.isChecked())
+        for spin in self.tree_crown_type_percentage_spins.values():
+            spin.setEnabled(is_custom_distribution)
+
+        crown_custom_size = not bool(self.random_tree_crown_size_check.isChecked())
+        self.tree_max_crown_diameter_spin.setEnabled(crown_custom_size)
+        self.tree_max_crown_top_height_spin.setEnabled(crown_custom_size)
+        self.tree_min_crown_bottom_height_spin.setEnabled(crown_custom_size)
+
+        error = self._high_vegetation_validation_error()
+        if error is None:
+            self.high_vegetation_validation_label.setText("Valid")
+            self.high_vegetation_validation_label.setStyleSheet("color: #1f7a1f;")
+        else:
+            self.high_vegetation_validation_label.setText(error)
+            self.high_vegetation_validation_label.setStyleSheet("color: #b00020;")
+
+        self._update_tree_crown_distribution_summary()
+        self._update_ok_button_state()
+
+    def _update_vehicle_settings_state(self) -> None:
+        self.vehicle_count_spin.setEnabled(bool(self.custom_vehicle_count_check.isChecked()))
+        is_custom_distribution = bool(self.custom_vehicle_type_check.isChecked())
+        for spin in self.vehicle_type_percentage_spins.values():
+            spin.setEnabled(is_custom_distribution)
+        self._update_vehicle_distribution_summary()
+
+    def _update_low_vegetation_state(self) -> None:
+        self.shrub_count_spin.setEnabled(bool(self.custom_shrub_count_check.isChecked()))
+        shrub_custom_size = not bool(self.random_shrub_size_check.isChecked())
+        self.shrub_max_diameter_spin.setEnabled(shrub_custom_size)
+        self.shrub_max_top_height_spin.setEnabled(shrub_custom_size)
+        self.shrub_min_bottom_height_spin.setEnabled(shrub_custom_size)
+
+        self.grass_patch_count_spin.setEnabled(bool(self.custom_grass_patch_count_check.isChecked()))
+        grass_custom_size = not bool(self.random_grass_patch_size_check.isChecked())
+        self.grass_patch_max_size_x_spin.setEnabled(grass_custom_size)
+        self.grass_patch_max_size_y_spin.setEnabled(grass_custom_size)
+        self.grass_max_height_spin.setEnabled(grass_custom_size)
+
+        error = self._low_vegetation_validation_error()
+        if error is None:
+            self.low_vegetation_validation_label.setText("Valid")
+            self.low_vegetation_validation_label.setStyleSheet("color: #1f7a1f;")
+        else:
+            self.low_vegetation_validation_label.setText(error)
+            self.low_vegetation_validation_label.setStyleSheet("color: #b00020;")
+        self._update_ok_button_state()
+
+    def _update_class_distribution_summary(self) -> None:
+        total = float(sum(self._current_class_percentages()))
+        is_custom = bool(self.custom_distribution_check.isChecked())
+        is_valid = self._is_class_distribution_valid()
+
+        if not is_custom:
+            text = f"{total:.2f}% (custom disabled, defaults from generator will be used)"
+            color = "#666666"
+        elif is_valid:
+            text = f"{total:.2f}% (valid)"
+            color = "#1f7a1f"
+        elif total <= 0.0:
+            text = f"{total:.2f}% (invalid: at least one class must be > 0)"
+            color = "#b00020"
+        else:
+            text = f"{total:.2f}% (invalid: must equal 100.00%)"
+            color = "#b00020"
+
+        self.class_distribution_sum_label.setText(text)
+        self.class_distribution_sum_label.setStyleSheet(f"color: {color};")
+        self._update_ok_button_state()
+
+    def _update_tree_crown_distribution_summary(self) -> None:
+        total = float(sum(self._current_tree_crown_type_percentages()))
+        is_custom = bool(self.custom_tree_crown_type_check.isChecked())
+        is_valid = self._is_tree_crown_distribution_valid()
+
+        if not is_custom:
+            text = f"{total:.2f}% (custom disabled, random distribution will be used)"
+            color = "#666666"
+        elif is_valid:
+            text = f"{total:.2f}% (valid)"
+            color = "#1f7a1f"
+        elif total <= 0.0:
+            text = f"{total:.2f}% (invalid: at least one type must be > 0)"
+            color = "#b00020"
+        else:
+            text = f"{total:.2f}% (invalid: must equal 100.00%)"
+            color = "#b00020"
+
+        self.tree_crown_distribution_sum_label.setText(text)
+        self.tree_crown_distribution_sum_label.setStyleSheet(f"color: {color};")
+        self._update_ok_button_state()
+
+    def _update_vehicle_distribution_summary(self) -> None:
+        total = float(sum(self._current_vehicle_type_percentages()))
+        is_custom = bool(self.custom_vehicle_type_check.isChecked())
+        is_valid = self._is_vehicle_distribution_valid()
+
+        if not is_custom:
+            text = f"{total:.2f}% (custom disabled, defaults from generator will be used)"
+            color = "#666666"
+        elif is_valid:
+            text = f"{total:.2f}% (valid)"
+            color = "#1f7a1f"
+        elif total <= 0.0:
+            text = f"{total:.2f}% (invalid: at least one type must be > 0)"
+            color = "#b00020"
+        else:
+            text = f"{total:.2f}% (invalid: must equal 100.00%)"
+            color = "#b00020"
+
+        self.vehicle_distribution_sum_label.setText(text)
+        self.vehicle_distribution_sum_label.setStyleSheet(f"color: {color};")
+        self._update_ok_button_state()
+
+    def _update_ok_button_state(self) -> None:
+        if self.ok_button is None:
+            return
+        self.ok_button.setEnabled(
+            self._is_class_distribution_valid()
+            and self._is_tree_crown_distribution_valid()
+            and self._is_vehicle_distribution_valid()
+            and self._high_vegetation_validation_error() is None
+            and self._low_vegetation_validation_error() is None
+        )
+
+    def accept(self) -> None:
+        errors: List[str] = []
+        if not self._is_class_distribution_valid():
+            errors.append(
+                "When custom class distribution is enabled, class percentages must sum to 100%."
+            )
+        if not self._is_tree_crown_distribution_valid():
+            errors.append(
+                "When custom tree crown type distribution is enabled, percentages must sum to 100%."
+            )
+        if not self._is_vehicle_distribution_valid():
+            errors.append(
+                "When custom vehicle type distribution is enabled, vehicle type percentages must sum to 100%."
+            )
+        high_veg_error = self._high_vegetation_validation_error()
+        if high_veg_error is not None:
+            errors.append(high_veg_error)
+        low_veg_error = self._low_vegetation_validation_error()
+        if low_veg_error is not None:
+            errors.append(low_veg_error)
+
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Invalid Generation Settings",
+                "\n".join(errors),
+            )
+            return
+        super().accept()
 
     def params(self) -> SyntheticGenerationParams:
         return SyntheticGenerationParams(
@@ -743,6 +1555,32 @@ class SyntheticGenerationDialog(QDialog):
             terrain_relief=float(self.terrain_relief_spin.value()),
             seed=int(self.seed_spin.value()),
             randomize_object_counts=bool(self.random_counts_check.isChecked()),
+            custom_class_distribution=bool(self.custom_distribution_check.isChecked()),
+            class_percentages=self._current_class_percentages(),
+            custom_tree_count=bool(self.custom_tree_count_check.isChecked()),
+            tree_count=int(self.tree_count_spin.value()),
+            custom_tree_crown_type_distribution=bool(self.custom_tree_crown_type_check.isChecked()),
+            tree_crown_type_percentages=self._current_tree_crown_type_percentages(),
+            random_tree_crown_size=bool(self.random_tree_crown_size_check.isChecked()),
+            tree_max_crown_diameter=float(self.tree_max_crown_diameter_spin.value()),
+            tree_max_crown_top_height=float(self.tree_max_crown_top_height_spin.value()),
+            tree_min_crown_bottom_height=float(self.tree_min_crown_bottom_height_spin.value()),
+            custom_vehicle_count=bool(self.custom_vehicle_count_check.isChecked()),
+            vehicle_count=int(self.vehicle_count_spin.value()),
+            custom_vehicle_type_distribution=bool(self.custom_vehicle_type_check.isChecked()),
+            vehicle_type_percentages=self._current_vehicle_type_percentages(),
+            custom_shrub_count=bool(self.custom_shrub_count_check.isChecked()),
+            shrub_count=int(self.shrub_count_spin.value()),
+            random_shrub_size=bool(self.random_shrub_size_check.isChecked()),
+            shrub_max_diameter=float(self.shrub_max_diameter_spin.value()),
+            shrub_max_top_height=float(self.shrub_max_top_height_spin.value()),
+            shrub_min_bottom_height=float(self.shrub_min_bottom_height_spin.value()),
+            custom_grass_patch_count=bool(self.custom_grass_patch_count_check.isChecked()),
+            grass_patch_count=int(self.grass_patch_count_spin.value()),
+            random_grass_patch_size=bool(self.random_grass_patch_size_check.isChecked()),
+            grass_patch_max_size_x=float(self.grass_patch_max_size_x_spin.value()),
+            grass_patch_max_size_y=float(self.grass_patch_max_size_y_spin.value()),
+            grass_max_height=float(self.grass_max_height_spin.value()),
         )
 
 
@@ -857,7 +1695,8 @@ class PointCloudGLWidget(QOpenGLWidget):
             self._move_timer.stop()
             self.setMouseTracking(False)
             self.unsetCursor()
-            target = self._game_position + forward * self._distance
+            # Keep the exact world-space camera position when switching back to orbit.
+            target = self._game_position - self._camera_direction() * self._distance
             self._pan = target - self._scene_center
             self._last_mouse_pos = None
 
@@ -1617,14 +2456,74 @@ class MainWindow(QMainWindow):
         self._update_status_bar()
 
     def generate_synthetic_cloud(self) -> None:
-        dialog = SyntheticGenerationDialog(default_params=self._last_generation_params, parent=self)
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        params = dialog.params()
-
         synthetic_module = self._get_synthetic_module()
         if synthetic_module is None:
             return
+
+        class_names = getattr(synthetic_module, "CLASS_NAMES", None)
+        default_class_percentages = getattr(synthetic_module, "DEFAULT_CLASS_PERCENTAGES", None)
+        if default_class_percentages is None:
+            default_class_ratios = getattr(synthetic_module, "DEFAULT_CLASS_RATIOS", None)
+            if isinstance(default_class_ratios, dict):
+                default_class_percentages = tuple(
+                    float(default_class_ratios[class_id]) * 100.0
+                    for class_id in sorted(default_class_ratios)
+                )
+        tree_crown_type_names = getattr(synthetic_module, "TREE_CROWN_TYPE_NAMES", None)
+        default_tree_crown_type_percentages = getattr(
+            synthetic_module,
+            "DEFAULT_TREE_CROWN_TYPE_PERCENTAGES",
+            None,
+        )
+        if default_tree_crown_type_percentages is None:
+            default_tree_crown_type_ratios = getattr(
+                synthetic_module,
+                "DEFAULT_TREE_CROWN_TYPE_RATIOS",
+                None,
+            )
+            if isinstance(default_tree_crown_type_ratios, dict):
+                default_tree_crown_type_percentages = tuple(
+                    float(default_tree_crown_type_ratios.get(key, 0.0)) * 100.0
+                    for key in FALLBACK_TREE_CROWN_TYPES
+                )
+        high_veg_defaults = getattr(synthetic_module, "HIGH_VEG_DEFAULTS", None)
+        vehicle_type_names = getattr(synthetic_module, "VEHICLE_TYPE_NAMES", None)
+        default_vehicle_type_percentages = getattr(
+            synthetic_module,
+            "DEFAULT_VEHICLE_TYPE_PERCENTAGES",
+            None,
+        )
+        if default_vehicle_type_percentages is None:
+            default_vehicle_type_ratios = getattr(
+                synthetic_module,
+                "DEFAULT_VEHICLE_TYPE_RATIOS",
+                None,
+            )
+            if isinstance(default_vehicle_type_ratios, dict):
+                ordered_keys = ("car", "truck", "bus")
+                default_vehicle_type_percentages = tuple(
+                    float(default_vehicle_type_ratios.get(key, 0.0)) * 100.0
+                    for key in ordered_keys
+                )
+        low_veg_defaults = getattr(synthetic_module, "LOW_VEG_DEFAULTS", None)
+
+        dialog = SyntheticGenerationDialog(
+            default_params=self._last_generation_params,
+            class_names=class_names if isinstance(class_names, dict) else None,
+            default_class_percentages=default_class_percentages,
+            tree_crown_type_names=(
+                tree_crown_type_names if isinstance(tree_crown_type_names, dict) else None
+            ),
+            default_tree_crown_type_percentages=default_tree_crown_type_percentages,
+            high_veg_defaults=high_veg_defaults if isinstance(high_veg_defaults, dict) else None,
+            vehicle_type_names=vehicle_type_names if isinstance(vehicle_type_names, dict) else None,
+            default_vehicle_type_percentages=default_vehicle_type_percentages,
+            low_veg_defaults=low_veg_defaults if isinstance(low_veg_defaults, dict) else None,
+            parent=self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        params = dialog.params()
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -1635,6 +2534,53 @@ class MainWindow(QMainWindow):
                 terrain_relief=params.terrain_relief,
                 randomize_object_counts=params.randomize_object_counts,
                 seed=params.seed,
+                class_percentages=(
+                    params.class_percentages
+                    if params.custom_class_distribution
+                    else None
+                ),
+                tree_count=(
+                    params.tree_count
+                    if params.custom_tree_count
+                    else None
+                ),
+                tree_crown_type_percentages=(
+                    params.tree_crown_type_percentages
+                    if params.custom_tree_crown_type_distribution
+                    else None
+                ),
+                random_tree_crown_size=bool(params.random_tree_crown_size),
+                tree_max_crown_diameter=float(params.tree_max_crown_diameter),
+                tree_max_crown_top_height=float(params.tree_max_crown_top_height),
+                tree_min_crown_bottom_height=float(params.tree_min_crown_bottom_height),
+                vehicle_count=(
+                    params.vehicle_count
+                    if params.custom_vehicle_count
+                    else None
+                ),
+                vehicle_type_percentages=(
+                    params.vehicle_type_percentages
+                    if params.custom_vehicle_type_distribution
+                    else None
+                ),
+                shrub_count=(
+                    params.shrub_count
+                    if params.custom_shrub_count
+                    else None
+                ),
+                random_shrub_size=bool(params.random_shrub_size),
+                shrub_max_diameter=float(params.shrub_max_diameter),
+                shrub_max_top_height=float(params.shrub_max_top_height),
+                shrub_min_bottom_height=float(params.shrub_min_bottom_height),
+                grass_patch_count=(
+                    params.grass_patch_count
+                    if params.custom_grass_patch_count
+                    else None
+                ),
+                random_grass_patch_size=bool(params.random_grass_patch_size),
+                grass_patch_max_size_x=float(params.grass_patch_max_size_x),
+                grass_patch_max_size_y=float(params.grass_patch_max_size_y),
+                grass_max_height=float(params.grass_max_height),
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Generation Error", f"Failed to generate point cloud:\n{exc}")

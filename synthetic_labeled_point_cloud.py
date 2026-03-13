@@ -47,6 +47,78 @@ CLASS_COLORS: Dict[int, Tuple[float, float, float]] = {
     7: (0.68, 0.18, 0.72),  # magenta
 }
 
+CLASS_IDS: Tuple[int, ...] = tuple(sorted(CLASS_NAMES))
+DEFAULT_CLASS_RATIOS: Dict[int, float] = {
+    0: 0.38,
+    1: 0.13,
+    2: 0.16,
+    3: 0.14,
+    4: 0.10,
+    5: 0.04,
+    6: 0.03,
+    7: 0.02,
+}
+DEFAULT_CLASS_PERCENTAGES: Tuple[float, ...] = tuple(
+    DEFAULT_CLASS_RATIOS[class_id] * 100.0 for class_id in CLASS_IDS
+)
+
+VEHICLE_TYPES: Tuple[str, ...] = ("car", "truck", "bus")
+VEHICLE_TYPE_NAMES: Dict[str, str] = {
+    "car": "Passenger car",
+    "truck": "Truck",
+    "bus": "Bus",
+}
+DEFAULT_VEHICLE_TYPE_RATIOS: Dict[str, float] = {
+    "car": 0.72,
+    "truck": 0.18,
+    "bus": 0.10,
+}
+DEFAULT_VEHICLE_TYPE_PERCENTAGES: Tuple[float, ...] = tuple(
+    DEFAULT_VEHICLE_TYPE_RATIOS[vehicle_type] * 100.0 for vehicle_type in VEHICLE_TYPES
+)
+
+LOW_VEG_DEFAULTS: Dict[str, float] = {
+    "shrub_max_diameter": 2.6,
+    "shrub_max_top_height": 1.8,
+    "shrub_min_bottom_height": 0.12,
+    "grass_patch_max_size_x": 3.8,
+    "grass_patch_max_size_y": 3.4,
+    "grass_max_height": 0.65,
+}
+
+TREE_CROWN_TYPES: Tuple[str, ...] = (
+    "spherical",
+    "pyramidal",
+    "spreading",
+    "weeping",
+    "columnar",
+    "umbrella",
+)
+TREE_CROWN_TYPE_NAMES: Dict[str, str] = {
+    "spherical": "Spherical",
+    "pyramidal": "Pyramidal",
+    "spreading": "Spreading",
+    "weeping": "Weeping",
+    "columnar": "Columnar",
+    "umbrella": "Umbrella",
+}
+DEFAULT_TREE_CROWN_TYPE_RATIOS: Dict[str, float] = {
+    "spherical": 0.28,
+    "pyramidal": 0.18,
+    "spreading": 0.20,
+    "weeping": 0.10,
+    "columnar": 0.12,
+    "umbrella": 0.12,
+}
+DEFAULT_TREE_CROWN_TYPE_PERCENTAGES: Tuple[float, ...] = tuple(
+    DEFAULT_TREE_CROWN_TYPE_RATIOS[crown_type] * 100.0 for crown_type in TREE_CROWN_TYPES
+)
+HIGH_VEG_DEFAULTS: Dict[str, float] = {
+    "tree_max_crown_diameter": 5.2,
+    "tree_max_crown_top_height": 9.5,
+    "tree_min_crown_bottom_height": 1.3,
+}
+
 Rect = Tuple[float, float, float, float]  # center_x, center_y, size_x, size_y
 
 
@@ -60,6 +132,135 @@ def _validate_unit_interval(value: float, name: str) -> None:
     """Validate that a value is inside [0, 1]."""
     if value < 0.0 or value > 1.0:
         raise ValueError(f"`{name}` must be in [0, 1], got {value}.")
+
+
+def _class_ratios_from_percentages(
+    class_percentages: Sequence[float] | Dict[int, float] | None,
+) -> Dict[int, float]:
+    """
+    Build normalized per-class ratios from optional percentages.
+    - None -> default distribution.
+    - Sequence -> 8 percentages for classes 0..7.
+    - Dict -> class_id -> percentage; missing classes are treated as 0.
+    """
+    if class_percentages is None:
+        return dict(DEFAULT_CLASS_RATIOS)
+
+    if isinstance(class_percentages, dict):
+        unknown = sorted(set(class_percentages) - set(CLASS_IDS))
+        if unknown:
+            raise ValueError(
+                f"Unknown class ids in `class_percentages`: {unknown}. "
+                f"Supported ids are {list(CLASS_IDS)}."
+            )
+        values = [float(class_percentages.get(class_id, 0.0)) for class_id in CLASS_IDS]
+    else:
+        values = [float(value) for value in class_percentages]
+        if len(values) != len(CLASS_IDS):
+            raise ValueError(
+                f"`class_percentages` must contain exactly {len(CLASS_IDS)} values "
+                f"(for classes {list(CLASS_IDS)}), got {len(values)}."
+            )
+
+    weights = np.array(values, dtype=np.float64)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("`class_percentages` must contain only finite numbers.")
+    if np.any(weights < 0.0):
+        raise ValueError("`class_percentages` must be non-negative.")
+    if np.isclose(weights.sum(), 0.0):
+        raise ValueError("At least one class percentage must be > 0.")
+
+    ratios = weights / weights.sum()
+    return {class_id: float(ratios[idx]) for idx, class_id in enumerate(CLASS_IDS)}
+
+
+def _vehicle_type_ratios_from_percentages(
+    vehicle_type_percentages: Sequence[float] | Dict[str, float] | None,
+) -> Dict[str, float]:
+    """
+    Build normalized vehicle type ratios from optional percentages.
+    Supports sequence [car, truck, bus] or mapping by keys: car, truck, bus.
+    """
+    if vehicle_type_percentages is None:
+        return dict(DEFAULT_VEHICLE_TYPE_RATIOS)
+
+    if isinstance(vehicle_type_percentages, dict):
+        normalized: Dict[str, float] = {}
+        for key, value in vehicle_type_percentages.items():
+            type_id = str(key).strip().lower()
+            if type_id not in VEHICLE_TYPES:
+                raise ValueError(
+                    f"Unknown vehicle type key `{key}` in `vehicle_type_percentages`. "
+                    f"Supported keys are {list(VEHICLE_TYPES)}."
+                )
+            normalized[type_id] = float(value)
+        values = [float(normalized.get(vehicle_type, 0.0)) for vehicle_type in VEHICLE_TYPES]
+    else:
+        values = [float(value) for value in vehicle_type_percentages]
+        if len(values) != len(VEHICLE_TYPES):
+            raise ValueError(
+                f"`vehicle_type_percentages` must contain exactly {len(VEHICLE_TYPES)} values "
+                f"(for types {list(VEHICLE_TYPES)}), got {len(values)}."
+            )
+
+    weights = np.array(values, dtype=np.float64)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("`vehicle_type_percentages` must contain only finite numbers.")
+    if np.any(weights < 0.0):
+        raise ValueError("`vehicle_type_percentages` must be non-negative.")
+    if np.isclose(weights.sum(), 0.0):
+        raise ValueError("At least one vehicle type percentage must be > 0.")
+
+    weights = weights / weights.sum()
+    return {
+        vehicle_type: float(weights[idx])
+        for idx, vehicle_type in enumerate(VEHICLE_TYPES)
+    }
+
+
+def _tree_crown_type_ratios_from_percentages(
+    tree_crown_type_percentages: Sequence[float] | Dict[str, float] | None,
+) -> Dict[str, float]:
+    """
+    Build normalized tree crown type ratios from optional percentages.
+    Supports sequence [spherical, pyramidal, spreading, weeping, columnar, umbrella]
+    or mapping by crown type keys.
+    """
+    if tree_crown_type_percentages is None:
+        return dict(DEFAULT_TREE_CROWN_TYPE_RATIOS)
+
+    if isinstance(tree_crown_type_percentages, dict):
+        normalized: Dict[str, float] = {}
+        for key, value in tree_crown_type_percentages.items():
+            crown_type = str(key).strip().lower()
+            if crown_type not in TREE_CROWN_TYPES:
+                raise ValueError(
+                    f"Unknown crown type key `{key}` in `tree_crown_type_percentages`. "
+                    f"Supported keys are {list(TREE_CROWN_TYPES)}."
+                )
+            normalized[crown_type] = float(value)
+        values = [float(normalized.get(crown_type, 0.0)) for crown_type in TREE_CROWN_TYPES]
+    else:
+        values = [float(value) for value in tree_crown_type_percentages]
+        if len(values) != len(TREE_CROWN_TYPES):
+            raise ValueError(
+                f"`tree_crown_type_percentages` must contain exactly {len(TREE_CROWN_TYPES)} "
+                f"values (for crown types {list(TREE_CROWN_TYPES)}), got {len(values)}."
+            )
+
+    weights = np.array(values, dtype=np.float64)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("`tree_crown_type_percentages` must contain only finite numbers.")
+    if np.any(weights < 0.0):
+        raise ValueError("`tree_crown_type_percentages` must be non-negative.")
+    if np.isclose(weights.sum(), 0.0):
+        raise ValueError("At least one tree crown type percentage must be > 0.")
+
+    weights = weights / weights.sum()
+    return {
+        crown_type: float(weights[idx])
+        for idx, crown_type in enumerate(TREE_CROWN_TYPES)
+    }
 
 
 def allocate_points(total_points: int, class_ratios: Dict[int, float]) -> Dict[int, int]:
@@ -453,33 +654,60 @@ def _generate_tree_points(
     ground_z: float,
     trunk_radius: float,
     trunk_height: float,
-    crown_radius: float,
+    crown_type: str,
+    crown_diameter: float,
+    crown_bottom_height: float,
+    crown_top_height: float,
 ) -> np.ndarray:
-    """Points for one tree: trunk cylinder + crown sphere volume."""
+    """Points for one tree with crown shape controlled by `crown_type`."""
     if n_points <= 0:
         return np.empty((0, 4), dtype=np.float64)
 
-    trunk_n = max(1, int(n_points * 0.35))
+    crown_height = max(0.2, float(crown_top_height) - float(crown_bottom_height))
+    crown_radius = max(0.25, 0.5 * float(crown_diameter))
+    crown_type_id = str(crown_type).strip().lower()
+    if crown_type_id not in TREE_CROWN_TYPES:
+        crown_type_id = "spherical"
+
+    trunk_share = {
+        "spherical": 0.34,
+        "pyramidal": 0.30,
+        "spreading": 0.36,
+        "weeping": 0.33,
+        "columnar": 0.31,
+        "umbrella": 0.35,
+    }.get(crown_type_id, 0.34)
+    trunk_n = max(1, int(n_points * trunk_share))
     crown_n = n_points - trunk_n
 
-    # Trunk as points near cylinder surface.
+    # Trunk as mildly tapered cylinder with small lean.
+    z_rel = rng.uniform(0.0, 1.0, size=trunk_n)
     theta = rng.uniform(0.0, 2.0 * np.pi, size=trunk_n)
-    radial = trunk_radius + rng.normal(0.0, trunk_radius * 0.08, size=trunk_n)
-    x_trunk = cx + radial * np.cos(theta)
-    y_trunk = cy + radial * np.sin(theta)
-    z_trunk = ground_z + rng.uniform(0.0, trunk_height, size=trunk_n)
+    taper = np.clip(1.0 - 0.2 * z_rel, 0.75, 1.0)
+    radial = taper * trunk_radius + rng.normal(0.0, trunk_radius * 0.05, size=trunk_n)
+    lean_mag = float(rng.normal(0.0, min(0.14, 0.03 * max(1.0, trunk_height))))
+    lean_dir = float(rng.uniform(0.0, 2.0 * np.pi))
+    lean_x = lean_mag * np.cos(lean_dir)
+    lean_y = lean_mag * np.sin(lean_dir)
+    x_trunk = cx + radial * np.cos(theta) + lean_x * z_rel
+    y_trunk = cy + radial * np.sin(theta) + lean_y * z_rel
+    z_trunk = ground_z + z_rel * trunk_height + rng.normal(0.0, 0.01, size=trunk_n)
 
-    # Crown as random points inside a sphere around trunk top.
+    # Crown local coordinates.
     if crown_n > 0:
-        direction = rng.normal(size=(crown_n, 3))
-        direction /= np.linalg.norm(direction, axis=1, keepdims=True) + 1e-12
-        radius = crown_radius * np.cbrt(rng.uniform(0.0, 1.0, size=crown_n))
-        crown = direction * radius[:, None]
-        crown[:, 0] += cx
-        crown[:, 1] += cy
-        crown[:, 2] += ground_z + trunk_height + 0.45 * crown_radius
-        crown[:, 2] = np.maximum(crown[:, 2], ground_z + 0.7 * trunk_height)
-        x_crown, y_crown, z_crown = crown[:, 0], crown[:, 1], crown[:, 2]
+        crown_local = _sample_tree_crown_local(
+            rng=rng,
+            n_points=crown_n,
+            crown_type=crown_type_id,
+            crown_radius=crown_radius,
+            crown_height=crown_height,
+        )
+        x_crown = cx + crown_local[:, 0]
+        y_crown = cy + crown_local[:, 1]
+        z_crown = ground_z + float(crown_bottom_height) + crown_local[:, 2]
+        # Keep crown above trunk shoulder to avoid disconnected tree parts.
+        z_floor = ground_z + max(0.08, min(float(crown_bottom_height), 0.92 * trunk_height))
+        z_crown = np.maximum(z_crown, z_floor)
     else:
         x_crown = np.empty(0)
         y_crown = np.empty(0)
@@ -491,6 +719,154 @@ def _generate_tree_points(
     labels = np.full(x.size, 3, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
+
+def _sample_tree_crown_local(
+    rng: np.random.Generator,
+    n_points: int,
+    crown_type: str,
+    crown_radius: float,
+    crown_height: float,
+) -> np.ndarray:
+    """Sample local crown points for a tree type; z is in [0, crown_height]."""
+    if n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    crown_type_id = str(crown_type).strip().lower()
+    if crown_type_id not in TREE_CROWN_TYPES:
+        crown_type_id = "spherical"
+    crown_radius = max(0.25, float(crown_radius))
+    crown_height = max(0.2, float(crown_height))
+
+    if crown_type_id == "spherical":
+        direction = rng.normal(size=(n_points, 3))
+        direction /= np.linalg.norm(direction, axis=1, keepdims=True) + 1e-12
+        radius = np.cbrt(rng.uniform(0.0, 1.0, size=n_points))
+        local = direction * radius[:, None]
+        local[:, 0] *= crown_radius
+        local[:, 1] *= crown_radius
+        local[:, 2] *= 0.5 * crown_height
+        local[:, 2] += 0.5 * crown_height
+        return local
+
+    if crown_type_id == "pyramidal":
+        z_rel = np.power(rng.uniform(0.0, 1.0, size=n_points), 0.75)
+        max_r = crown_radius * np.clip(1.0 - z_rel, 0.0, 1.0)
+        r = np.sqrt(rng.uniform(0.0, 1.0, size=n_points)) * max_r
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=n_points)
+        x = r * np.cos(theta)
+        y = r * np.sin(theta)
+        z = z_rel * crown_height
+        return np.column_stack((x, y, z))
+
+    theta = rng.uniform(0.0, 2.0 * np.pi, size=n_points)
+    if crown_type_id == "spreading":
+        r_norm = np.power(rng.uniform(0.0, 1.0, size=n_points), 0.42)
+        z_bottom = 0.10 + 0.22 * np.power(r_norm, 1.30)
+        z_top = 0.94 - 0.44 * np.power(r_norm, 1.85)
+    elif crown_type_id == "weeping":
+        r_norm = np.power(rng.uniform(0.0, 1.0, size=n_points), 0.55)
+        z_bottom = 0.35 - 0.30 * np.power(r_norm, 1.90)
+        z_top = 0.95 - 0.46 * np.power(r_norm, 1.35)
+    elif crown_type_id == "columnar":
+        z_rel = rng.uniform(0.0, 1.0, size=n_points)
+        max_r = crown_radius * np.clip(0.42 - 0.16 * np.abs(2.0 * z_rel - 1.0), 0.20, 0.42)
+        r = np.sqrt(rng.uniform(0.0, 1.0, size=n_points)) * max_r
+        x = r * np.cos(theta)
+        y = r * np.sin(theta)
+        z = z_rel * crown_height
+        return np.column_stack((x, y, z))
+    else:
+        # Umbrella crown: dense top + low hanging edge.
+        r_norm = np.power(rng.uniform(0.0, 1.0, size=n_points), 0.38)
+        z_top = 0.78 + 0.20 * (1.0 - np.power(r_norm, 1.45))
+        inner_bottom = 0.52 + 0.10 * (1.0 - r_norm)
+        edge_bottom = 0.16 + 0.30 * (1.0 - r_norm)
+        z_bottom = np.where(r_norm < 0.65, inner_bottom, edge_bottom)
+
+    r = crown_radius * r_norm
+    x = r * np.cos(theta)
+    y = r * np.sin(theta)
+    z_span = np.maximum(0.06, z_top - z_bottom)
+    z = (z_bottom + rng.uniform(0.0, 1.0, size=n_points) * z_span) * crown_height
+    return np.column_stack((x, y, z))
+
+
+def _sample_tree_crown_dimensions(
+    rng: np.random.Generator,
+    crown_type: str,
+    random_size: bool,
+    tree_max_crown_diameter: float,
+    tree_max_crown_top_height: float,
+    tree_min_crown_bottom_height: float,
+) -> Tuple[float, float, float]:
+    """Sample crown diameter, crown bottom and crown top heights above ground."""
+    crown_type_id = str(crown_type).strip().lower()
+    if crown_type_id not in TREE_CROWN_TYPES:
+        crown_type_id = "spherical"
+
+    if random_size:
+        type_ranges = {
+            "spherical": (2.2, 5.8, 1.2, 3.2, 5.6, 11.8),
+            "pyramidal": (2.0, 4.8, 0.7, 2.0, 6.0, 13.2),
+            "spreading": (3.2, 7.2, 1.8, 3.9, 6.0, 11.6),
+            "weeping": (2.6, 5.8, 1.2, 3.1, 5.4, 10.8),
+            "columnar": (1.5, 3.6, 0.8, 2.4, 5.8, 13.5),
+            "umbrella": (3.2, 7.6, 2.0, 4.7, 6.0, 12.4),
+        }
+        d_min, d_max, b_min, b_max, t_min, t_max = type_ranges[crown_type_id]
+        crown_diameter = float(rng.uniform(d_min, d_max))
+        crown_bottom = float(rng.uniform(b_min, b_max))
+        crown_top = float(rng.uniform(max(crown_bottom + 0.8, t_min), t_max))
+        return crown_diameter, crown_bottom, crown_top
+
+    type_diameter_min_factor = {
+        "spherical": 0.45,
+        "pyramidal": 0.42,
+        "spreading": 0.50,
+        "weeping": 0.44,
+        "columnar": 0.34,
+        "umbrella": 0.52,
+    }
+    type_bottom_span_factor = {
+        "spherical": 0.44,
+        "pyramidal": 0.36,
+        "spreading": 0.52,
+        "weeping": 0.42,
+        "columnar": 0.34,
+        "umbrella": 0.58,
+    }
+    type_top_low_factor = {
+        "spherical": 0.68,
+        "pyramidal": 0.74,
+        "spreading": 0.66,
+        "weeping": 0.64,
+        "columnar": 0.72,
+        "umbrella": 0.70,
+    }
+
+    crown_diameter = float(
+        rng.uniform(
+            max(0.8, type_diameter_min_factor[crown_type_id] * tree_max_crown_diameter),
+            float(tree_max_crown_diameter),
+        )
+    )
+    bottom_low = float(tree_min_crown_bottom_height)
+    bottom_high = min(
+        float(tree_max_crown_top_height) - 0.7,
+        bottom_low
+        + type_bottom_span_factor[crown_type_id]
+        * max(0.8, float(tree_max_crown_top_height) - bottom_low),
+    )
+    bottom_high = max(bottom_low, bottom_high)
+    crown_bottom = float(rng.uniform(bottom_low, bottom_high))
+
+    top_low = max(
+        crown_bottom + 0.7,
+        type_top_low_factor[crown_type_id] * float(tree_max_crown_top_height),
+    )
+    top_low = min(top_low, float(tree_max_crown_top_height))
+    crown_top = float(rng.uniform(top_low, float(tree_max_crown_top_height)))
+    return crown_diameter, crown_bottom, crown_top
 
 def _generate_fence_points(
     rng: np.random.Generator,
@@ -776,24 +1152,28 @@ def _generate_bridge_points(
     return np.column_stack((x, y, z, labels))
 
 
-def _generate_vehicle_points(
+def _sample_cuboid_surface_local(
     rng: np.random.Generator,
     n_points: int,
-    x_center: float,
-    y_center: float,
-    base_z: float,
     length: float,
     width: float,
     height: float,
-    yaw: float,
+    x_center: float = 0.0,
+    y_center: float = 0.0,
+    z_base: float = 0.0,
 ) -> np.ndarray:
-    """Generate compact cuboid-like vehicle points."""
+    """Sample points on cuboid surfaces in local vehicle coordinates."""
     if n_points <= 0:
-        return np.empty((0, 4), dtype=np.float64)
+        return np.empty((0, 3), dtype=np.float64)
 
     face = rng.integers(0, 6, size=n_points)
     u = rng.uniform(-0.5, 0.5, size=n_points)
     v = rng.uniform(-0.5, 0.5, size=n_points)
+
+    hx = 0.5 * float(length)
+    hy = 0.5 * float(width)
+    hz = 0.5 * float(height)
+    cz = float(z_base) + hz
 
     local = np.empty((n_points, 3), dtype=np.float64)
 
@@ -806,54 +1186,557 @@ def _generate_vehicle_points(
 
     local[plus_x] = np.column_stack(
         [
-            np.full(np.sum(plus_x), +0.5 * length),
-            u[plus_x] * width,
-            v[plus_x] * height,
+            np.full(np.sum(plus_x), x_center + hx),
+            y_center + u[plus_x] * 2.0 * hy,
+            cz + v[plus_x] * 2.0 * hz,
         ]
     )
     local[minus_x] = np.column_stack(
         [
-            np.full(np.sum(minus_x), -0.5 * length),
-            u[minus_x] * width,
-            v[minus_x] * height,
+            np.full(np.sum(minus_x), x_center - hx),
+            y_center + u[minus_x] * 2.0 * hy,
+            cz + v[minus_x] * 2.0 * hz,
         ]
     )
     local[plus_y] = np.column_stack(
         [
-            u[plus_y] * length,
-            np.full(np.sum(plus_y), +0.5 * width),
-            v[plus_y] * height,
+            x_center + u[plus_y] * 2.0 * hx,
+            np.full(np.sum(plus_y), y_center + hy),
+            cz + v[plus_y] * 2.0 * hz,
         ]
     )
     local[minus_y] = np.column_stack(
         [
-            u[minus_y] * length,
-            np.full(np.sum(minus_y), -0.5 * width),
-            v[minus_y] * height,
+            x_center + u[minus_y] * 2.0 * hx,
+            np.full(np.sum(minus_y), y_center - hy),
+            cz + v[minus_y] * 2.0 * hz,
         ]
     )
     local[plus_z] = np.column_stack(
         [
-            u[plus_z] * length,
-            v[plus_z] * width,
-            np.full(np.sum(plus_z), +0.5 * height),
+            x_center + u[plus_z] * 2.0 * hx,
+            y_center + v[plus_z] * 2.0 * hy,
+            np.full(np.sum(plus_z), cz + hz),
         ]
     )
     local[minus_z] = np.column_stack(
         [
-            u[minus_z] * length,
-            v[minus_z] * width,
-            np.full(np.sum(minus_z), -0.5 * height),
+            x_center + u[minus_z] * 2.0 * hx,
+            y_center + v[minus_z] * 2.0 * hy,
+            np.full(np.sum(minus_z), cz - hz),
         ]
     )
+    return local
+
+
+def _sample_sloped_front_local(
+    rng: np.random.Generator,
+    n_points: int,
+    width: float,
+    x_rear: float,
+    x_front: float,
+    z_rear: float,
+    z_front: float,
+) -> np.ndarray:
+    """Sample points on sloped hood / windshield-like front section."""
+    if n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    x0 = float(min(x_rear, x_front))
+    x1 = float(max(x_rear, x_front))
+    z0 = float(z_rear)
+    z1 = float(z_front)
+    half_w = 0.5 * float(width)
+    if x1 - x0 < 1e-4:
+        x1 = x0 + 1e-4
+
+    part = rng.choice([0, 1, 2], size=n_points, p=[0.52, 0.30, 0.18])
+    local = np.empty((n_points, 3), dtype=np.float64)
+
+    mask_top = part == 0
+    if np.any(mask_top):
+        xt = rng.uniform(x0, x1, size=int(np.sum(mask_top)))
+        yt = rng.uniform(-half_w, half_w, size=int(np.sum(mask_top)))
+        alpha = (xt - x0) / (x1 - x0)
+        zt = z0 + alpha * (z1 - z0) + rng.normal(0.0, 0.01, size=xt.size)
+        local[mask_top] = np.column_stack((xt, yt, zt))
+
+    mask_front = part == 1
+    if np.any(mask_front):
+        yf = rng.uniform(-half_w, half_w, size=int(np.sum(mask_front)))
+        zf = rng.uniform(min(z0, z1), max(z0, z1), size=yf.size)
+        local[mask_front] = np.column_stack(
+            (np.full(yf.size, x1), yf, zf + rng.normal(0.0, 0.01, size=yf.size))
+        )
+
+    mask_side = part == 2
+    if np.any(mask_side):
+        xs = rng.uniform(x0, x1, size=int(np.sum(mask_side)))
+        side = rng.choice([-1.0, 1.0], size=xs.size)
+        ys = side * half_w + rng.normal(0.0, 0.01, size=xs.size)
+        alpha = (xs - x0) / (x1 - x0)
+        z_top = z0 + alpha * (z1 - z0)
+        zs = rng.uniform(0.25 * min(z0, z1), z_top, size=xs.size)
+        local[mask_side] = np.column_stack((xs, ys, zs))
+
+    return local
+
+
+def _sample_wheel_surface_local(
+    rng: np.random.Generator,
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    z_center: float,
+    radius: float,
+    thickness: float,
+) -> np.ndarray:
+    """Sample wheel-like points (rim + side discs)."""
+    if n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    radius = max(0.12, float(radius))
+    half_t = max(0.04, 0.5 * float(thickness))
+    comp = rng.choice([0, 1, 2], size=n_points, p=[0.56, 0.22, 0.22])
+    local = np.empty((n_points, 3), dtype=np.float64)
+
+    mask_rim = comp == 0
+    if np.any(mask_rim):
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=int(np.sum(mask_rim)))
+        y = y_center + rng.uniform(-half_t, half_t, size=theta.size)
+        x = x_center + radius * np.cos(theta)
+        z = z_center + radius * np.sin(theta)
+        local[mask_rim] = np.column_stack((x, y, z))
+
+    mask_left = comp == 1
+    if np.any(mask_left):
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=int(np.sum(mask_left)))
+        r = radius * np.sqrt(rng.uniform(0.0, 1.0, size=theta.size))
+        x = x_center + r * np.cos(theta)
+        z = z_center + r * np.sin(theta)
+        y = np.full(theta.size, y_center + half_t)
+        local[mask_left] = np.column_stack((x, y, z))
+
+    mask_right = comp == 2
+    if np.any(mask_right):
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=int(np.sum(mask_right)))
+        r = radius * np.sqrt(rng.uniform(0.0, 1.0, size=theta.size))
+        x = x_center + r * np.cos(theta)
+        z = z_center + r * np.sin(theta)
+        y = np.full(theta.size, y_center - half_t)
+        local[mask_right] = np.column_stack((x, y, z))
+
+    local[:, 2] = np.maximum(local[:, 2], 0.01)
+    return local
+
+
+def _sample_arched_roof_local(
+    rng: np.random.Generator,
+    n_points: int,
+    length: float,
+    width: float,
+    x_center: float,
+    z_base: float,
+    arch_height: float,
+) -> np.ndarray:
+    """Sample points on arched roof section (typical for buses)."""
+    if n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    x = x_center + rng.uniform(-0.5 * length, 0.5 * length, size=n_points)
+    side = rng.uniform(-1.0, 1.0, size=n_points)
+    y = side * 0.5 * width
+    lateral = np.clip(np.abs(side), 0.0, 1.0)
+    arch = np.sqrt(np.maximum(0.0, 1.0 - lateral**2))
+    z = z_base + arch_height * arch + rng.normal(0.0, 0.01, size=n_points)
+    return np.column_stack((x, y, z))
+
+
+def _sample_vehicle_dimensions(
+    rng: np.random.Generator,
+    vehicle_type: str,
+) -> Tuple[float, float, float]:
+    """Sample plausible dimensions in meters for each vehicle type."""
+    vehicle_type = str(vehicle_type).lower()
+    if vehicle_type == "truck":
+        return (
+            float(rng.uniform(6.6, 11.2)),
+            float(rng.uniform(2.2, 2.8)),
+            float(rng.uniform(2.8, 4.1)),
+        )
+    if vehicle_type == "bus":
+        return (
+            float(rng.uniform(9.8, 13.6)),
+            float(rng.uniform(2.4, 2.9)),
+            float(rng.uniform(3.0, 3.9)),
+        )
+    # passenger car
+    return (
+        float(rng.uniform(3.8, 5.2)),
+        float(rng.uniform(1.65, 2.05)),
+        float(rng.uniform(1.35, 1.85)),
+    )
+
+
+def _generate_vehicle_points(
+    rng: np.random.Generator,
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    base_z: float,
+    length: float,
+    width: float,
+    height: float,
+    yaw: float,
+    vehicle_type: str = "car",
+) -> np.ndarray:
+    """Generate vehicle-like points: body + cabin/roof + wheels."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    vehicle_type = str(vehicle_type).lower()
+    if vehicle_type not in VEHICLE_TYPES:
+        vehicle_type = "car"
+
+    parts: List[np.ndarray] = []
+    if vehicle_type == "truck":
+        n_chassis, n_cargo, n_cabin, n_front, n_wheels = _split_count_by_weights(
+            n_points, [0.22, 0.30, 0.18, 0.10, 0.20]
+        )
+        chassis_h = 0.28 * height
+        parts.append(
+            _sample_cuboid_surface_local(
+                rng, int(n_chassis), length * 0.96, width * 0.94, chassis_h, z_base=0.0
+            )
+        )
+        parts.append(
+            _sample_cuboid_surface_local(
+                rng,
+                int(n_cargo),
+                length * 0.60,
+                width * 0.92,
+                height * 0.54,
+                x_center=-0.13 * length,
+                z_base=chassis_h,
+            )
+        )
+        parts.append(
+            _sample_cuboid_surface_local(
+                rng,
+                int(n_cabin),
+                length * 0.25,
+                width * 0.88,
+                height * 0.62,
+                x_center=0.30 * length,
+                z_base=chassis_h,
+            )
+        )
+        parts.append(
+            _sample_sloped_front_local(
+                rng=rng,
+                n_points=int(n_front),
+                width=width * 0.84,
+                x_rear=0.31 * length,
+                x_front=0.48 * length,
+                z_rear=0.30 * height,
+                z_front=0.76 * height,
+            )
+        )
+        wheel_centers = [
+            (-0.35 * length, +0.48 * width),
+            (-0.35 * length, -0.48 * width),
+            (-0.06 * length, +0.48 * width),
+            (-0.06 * length, -0.48 * width),
+            (0.25 * length, +0.48 * width),
+            (0.25 * length, -0.48 * width),
+        ]
+        wheel_radius = max(0.34, min(0.72, 0.19 * height))
+        wheel_thickness = max(0.18, 0.18 * width)
+        wheel_counts = _split_count_evenly(int(n_wheels), len(wheel_centers))
+        for n_wheel, (wx, wy) in zip(wheel_counts, wheel_centers):
+            parts.append(
+                _sample_wheel_surface_local(
+                    rng=rng,
+                    n_points=int(n_wheel),
+                    x_center=float(wx),
+                    y_center=float(wy),
+                    z_center=wheel_radius + 0.03,
+                    radius=wheel_radius,
+                    thickness=wheel_thickness,
+                )
+            )
+    elif vehicle_type == "bus":
+        n_body, n_roof, n_caps, n_wheels = _split_count_by_weights(
+            n_points, [0.45, 0.20, 0.15, 0.20]
+        )
+        body_h = 0.64 * height
+        parts.append(
+            _sample_cuboid_surface_local(
+                rng, int(n_body), length * 0.96, width * 0.96, body_h, z_base=0.0
+            )
+        )
+        parts.append(
+            _sample_arched_roof_local(
+                rng=rng,
+                n_points=int(n_roof),
+                length=length * 0.90,
+                width=width * 0.92,
+                x_center=0.0,
+                z_base=body_h,
+                arch_height=0.34 * height,
+            )
+        )
+        cap_front, cap_back = _split_count_by_weights(int(n_caps), [0.5, 0.5])
+        parts.append(
+            _sample_sloped_front_local(
+                rng=rng,
+                n_points=int(cap_front),
+                width=width * 0.93,
+                x_rear=0.28 * length,
+                x_front=0.48 * length,
+                z_rear=0.28 * height,
+                z_front=0.86 * height,
+            )
+        )
+        parts.append(
+            _sample_sloped_front_local(
+                rng=rng,
+                n_points=int(cap_back),
+                width=width * 0.93,
+                x_rear=-0.48 * length,
+                x_front=-0.28 * length,
+                z_rear=0.86 * height,
+                z_front=0.28 * height,
+            )
+        )
+        wheel_centers = [
+            (-0.30 * length, +0.48 * width),
+            (-0.30 * length, -0.48 * width),
+            (0.30 * length, +0.48 * width),
+            (0.30 * length, -0.48 * width),
+        ]
+        wheel_radius = max(0.36, min(0.74, 0.18 * height))
+        wheel_thickness = max(0.20, 0.18 * width)
+        wheel_counts = _split_count_evenly(int(n_wheels), len(wheel_centers))
+        for n_wheel, (wx, wy) in zip(wheel_counts, wheel_centers):
+            parts.append(
+                _sample_wheel_surface_local(
+                    rng=rng,
+                    n_points=int(n_wheel),
+                    x_center=float(wx),
+                    y_center=float(wy),
+                    z_center=wheel_radius + 0.03,
+                    radius=wheel_radius,
+                    thickness=wheel_thickness,
+                )
+            )
+    else:
+        n_body, n_cabin, n_front, n_wheels = _split_count_by_weights(
+            n_points, [0.44, 0.24, 0.12, 0.20]
+        )
+        body_h = 0.56 * height
+        parts.append(
+            _sample_cuboid_surface_local(
+                rng,
+                int(n_body),
+                length * 0.94,
+                width * 0.95,
+                body_h,
+                x_center=-0.03 * length,
+                z_base=0.0,
+            )
+        )
+        parts.append(
+            _sample_cuboid_surface_local(
+                rng,
+                int(n_cabin),
+                length * 0.48,
+                width * 0.82,
+                height * 0.34,
+                x_center=-0.07 * length,
+                z_base=body_h * 0.72,
+            )
+        )
+        parts.append(
+            _sample_sloped_front_local(
+                rng=rng,
+                n_points=int(n_front),
+                width=width * 0.88,
+                x_rear=0.02 * length,
+                x_front=0.47 * length,
+                z_rear=0.24 * height,
+                z_front=0.68 * height,
+            )
+        )
+        wheel_centers = [
+            (-0.28 * length, +0.47 * width),
+            (-0.28 * length, -0.47 * width),
+            (0.23 * length, +0.47 * width),
+            (0.23 * length, -0.47 * width),
+        ]
+        wheel_radius = max(0.22, min(0.40, 0.24 * height))
+        wheel_thickness = max(0.14, 0.18 * width)
+        wheel_counts = _split_count_evenly(int(n_wheels), len(wheel_centers))
+        for n_wheel, (wx, wy) in zip(wheel_counts, wheel_centers):
+            parts.append(
+                _sample_wheel_surface_local(
+                    rng=rng,
+                    n_points=int(n_wheel),
+                    x_center=float(wx),
+                    y_center=float(wy),
+                    z_center=wheel_radius + 0.03,
+                    radius=wheel_radius,
+                    thickness=wheel_thickness,
+                )
+            )
+
+    local = np.vstack([part for part in parts if part.size > 0])
+    local[:, 2] = np.maximum(local[:, 2], 0.01)
 
     cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
     x = x_center + local[:, 0] * cos_yaw - local[:, 1] * sin_yaw
     y = y_center + local[:, 0] * sin_yaw + local[:, 1] * cos_yaw
-    z = base_z + local[:, 2] + 0.5 * height
-    z += rng.normal(0.0, 0.01, size=n_points)
+    z = base_z + local[:, 2] + rng.normal(0.0, 0.01, size=local.shape[0])
+    z = np.maximum(z, base_z + 0.005)
 
-    labels = np.full(n_points, 6, dtype=np.int32)
+    labels = np.full(local.shape[0], 6, dtype=np.int32)
+    return np.column_stack((x, y, z, labels))
+
+
+def _resolve_low_veg_counts(
+    n_low_veg_points: int,
+    area_size: Tuple[float, float],
+    rng: np.random.Generator,
+    shrub_count: int | None,
+    grass_patch_count: int | None,
+) -> Tuple[int, int]:
+    """Resolve shrub and grass patch counts (random or user-defined)."""
+    if n_low_veg_points <= 0:
+        return 0, 0
+
+    width_m, length_m = area_size
+    area_ha = (width_m * length_m) / 10_000.0
+
+    if shrub_count is None:
+        low = max(2, int(np.floor(10.0 * area_ha)))
+        high = max(low + 1, int(np.ceil(28.0 * area_ha + 3.0)))
+        shrub_count_eff = int(rng.integers(low, high + 1))
+    else:
+        shrub_count_eff = int(shrub_count)
+        if shrub_count_eff <= 0:
+            raise ValueError("`shrub_count` must be > 0 when provided.")
+
+    if grass_patch_count is None:
+        low = max(2, int(np.floor(7.0 * area_ha)))
+        high = max(low + 1, int(np.ceil(22.0 * area_ha + 2.0)))
+        grass_patch_count_eff = int(rng.integers(low, high + 1))
+    else:
+        grass_patch_count_eff = int(grass_patch_count)
+        if grass_patch_count_eff <= 0:
+            raise ValueError("`grass_patch_count` must be > 0 when provided.")
+
+    shrub_count_eff = min(shrub_count_eff, n_low_veg_points)
+    grass_patch_count_eff = min(grass_patch_count_eff, n_low_veg_points)
+    return max(1, shrub_count_eff), max(1, grass_patch_count_eff)
+
+
+def _generate_shrub_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    center_x: float,
+    center_y: float,
+    random_size: bool,
+    shrub_max_diameter: float,
+    shrub_max_top_height: float,
+    shrub_min_bottom_height: float,
+) -> np.ndarray:
+    """Generate one shrub cluster (class 2) with crown-like geometry."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    if random_size:
+        diameter = float(rng.uniform(0.75, 2.9))
+        top_h = float(rng.uniform(0.55, 1.85))
+        bottom_h = float(rng.uniform(0.05, min(0.55, top_h - 0.10)))
+    else:
+        diameter = float(
+            rng.uniform(max(0.45, 0.45 * shrub_max_diameter), float(shrub_max_diameter))
+        )
+        bottom_low = float(shrub_min_bottom_height)
+        bottom_high = min(
+            float(shrub_max_top_height) - 0.10,
+            bottom_low + 0.30 * max(0.12, float(shrub_max_top_height) - bottom_low),
+        )
+        bottom_high = max(bottom_low, bottom_high)
+        bottom_h = float(rng.uniform(bottom_low, bottom_high))
+
+        top_low = max(bottom_h + 0.10, 0.65 * float(shrub_max_top_height))
+        top_low = min(top_low, float(shrub_max_top_height))
+        top_h = float(rng.uniform(top_low, float(shrub_max_top_height)))
+
+    radius = max(0.18, 0.5 * diameter)
+    theta = rng.uniform(0.0, 2.0 * np.pi, size=n_points)
+    radial_norm = np.sqrt(rng.uniform(0.0, 1.0, size=n_points))
+    radial = radius * radial_norm
+
+    x = center_x + radial * np.cos(theta)
+    y = center_y + radial * np.sin(theta)
+    ground = terrain_fn(x, y)
+
+    edge_decay = np.power(np.clip(radial_norm, 0.0, 1.0), 1.7)
+    crown_top = top_h * (1.0 - 0.62 * edge_decay)
+    crown_top = np.maximum(crown_top, bottom_h + 0.08)
+    crown_bottom = bottom_h + 0.08 * (1.0 - edge_decay)
+    local_h = crown_bottom + rng.uniform(0.0, 1.0, size=n_points) * (crown_top - crown_bottom)
+    z = ground + local_h + rng.normal(0.0, 0.01, size=n_points)
+
+    labels = np.full(n_points, 2, dtype=np.int32)
+    return np.column_stack((x, y, z, labels))
+
+
+def _generate_grass_patch_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    center_x: float,
+    center_y: float,
+    random_size: bool,
+    grass_patch_max_size_x: float,
+    grass_patch_max_size_y: float,
+    grass_max_height: float,
+) -> np.ndarray:
+    """Generate one grassy patch (class 2) as an anisotropic ellipse."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    if random_size:
+        size_x = float(rng.uniform(0.8, 3.8))
+        size_y = float(rng.uniform(0.8, 3.6))
+        height_max = float(rng.uniform(0.10, 0.72))
+    else:
+        size_x = float(
+            rng.uniform(max(0.45, 0.40 * grass_patch_max_size_x), float(grass_patch_max_size_x))
+        )
+        size_y = float(
+            rng.uniform(max(0.45, 0.40 * grass_patch_max_size_y), float(grass_patch_max_size_y))
+        )
+        height_max = float(
+            rng.uniform(max(0.08, 0.35 * grass_max_height), float(grass_max_height))
+        )
+
+    theta = rng.uniform(0.0, 2.0 * np.pi, size=n_points)
+    radial_norm = np.sqrt(rng.uniform(0.0, 1.0, size=n_points))
+    x = center_x + 0.5 * size_x * radial_norm * np.cos(theta)
+    y = center_y + 0.5 * size_y * radial_norm * np.sin(theta)
+
+    ground = terrain_fn(x, y)
+    edge_profile = 1.0 - 0.55 * np.power(np.clip(radial_norm, 0.0, 1.0), 1.4)
+    local_h_max = np.maximum(0.05, height_max * edge_profile)
+    z = ground + rng.uniform(0.02, 1.0, size=n_points) * local_h_max
+    z += rng.normal(0.0, 0.006, size=n_points)
+
+    labels = np.full(n_points, 2, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -866,7 +1749,23 @@ def place_objects(
     num_buildings: int = 14,
     num_structures: int = 10,
     num_vehicles: int = 24,
+    vehicle_type_ratios: Dict[str, float] | None = None,
+    tree_crown_type_ratios: Dict[str, float] | None = None,
+    random_tree_crown_size: bool = True,
+    tree_max_crown_diameter: float = HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
+    tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
+    tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
     num_artifact_clusters: int = 40,
+    shrub_count: int | None = None,
+    random_shrub_size: bool = True,
+    shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
+    shrub_max_top_height: float = LOW_VEG_DEFAULTS["shrub_max_top_height"],
+    shrub_min_bottom_height: float = LOW_VEG_DEFAULTS["shrub_min_bottom_height"],
+    grass_patch_count: int | None = None,
+    random_grass_patch_size: bool = True,
+    grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
+    grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
+    grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
     seed: int = 43,
 ) -> np.ndarray:
     """
@@ -947,18 +1846,66 @@ def place_objects(
     n_tree_points = int(points_per_class.get(3, 0))
     if n_tree_points > 0:
         n_trees_eff = max(1, min(num_trees, n_tree_points))
-        per_tree = _split_count_evenly(n_tree_points, n_trees_eff)
+        per_tree = _split_count_random(n_tree_points, n_trees_eff, rng=rng, min_per_chunk=8)
+        if tree_crown_type_ratios is None:
+            random_type_weights = rng.dirichlet(
+                np.array([2.6, 1.8, 2.2, 1.3, 1.5, 1.6], dtype=np.float64)
+            )
+            tree_crown_type_ratios_eff = {
+                crown_type: float(random_type_weights[idx])
+                for idx, crown_type in enumerate(TREE_CROWN_TYPES)
+            }
+        else:
+            tree_crown_type_ratios_eff = {
+                crown_type: float(tree_crown_type_ratios.get(crown_type, 0.0))
+                for crown_type in TREE_CROWN_TYPES
+            }
+            if np.isclose(sum(tree_crown_type_ratios_eff.values()), 0.0):
+                tree_crown_type_ratios_eff = dict(DEFAULT_TREE_CROWN_TYPE_RATIOS)
+        per_crown_type = _split_count_by_weights(
+            n_trees_eff,
+            [tree_crown_type_ratios_eff[crown_type] for crown_type in TREE_CROWN_TYPES],
+        )
+        crown_types: List[str] = []
+        for crown_type, type_count in zip(TREE_CROWN_TYPES, per_crown_type):
+            crown_types.extend([crown_type] * int(type_count))
+        if len(crown_types) < n_trees_eff:
+            crown_types.extend(["spherical"] * (n_trees_eff - len(crown_types)))
+        crown_types = crown_types[:n_trees_eff]
+        rng.shuffle(crown_types)
+
         tree_forbidden = artificial_rects + [
             (cx, cy, sx + 3.5, sy + 3.5) for cx, cy, sx, sy in building_rects
         ]
-        for n_pts in per_tree:
-            cx, cy = _sample_single_xy(
-                rng, area_size=area_size, forbidden_rects=tree_forbidden, margin=0.2
+        tree_rects: List[Rect] = []
+        for n_pts, crown_type in zip(per_tree, crown_types):
+            crown_diameter, crown_bottom_h, crown_top_h = _sample_tree_crown_dimensions(
+                rng=rng,
+                crown_type=crown_type,
+                random_size=bool(random_tree_crown_size),
+                tree_max_crown_diameter=float(tree_max_crown_diameter),
+                tree_max_crown_top_height=float(tree_max_crown_top_height),
+                tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
             )
+            trunk_height = max(0.8, crown_bottom_h * float(rng.uniform(0.88, 1.05)))
+            trunk_radius = float(
+                np.clip(
+                    (0.055 * crown_diameter + 0.012 * crown_top_h)
+                    * rng.uniform(0.76, 1.28),
+                    0.10,
+                    0.65,
+                )
+            )
+
+            forbidden_rects = tree_forbidden + tree_rects
+            cx, cy = _sample_single_xy(
+                rng,
+                area_size=area_size,
+                forbidden_rects=forbidden_rects,
+                margin=0.15,
+            )
+            tree_rects.append((cx, cy, 1.12 * crown_diameter, 1.12 * crown_diameter))
             ground_z = float(terrain_fn(np.array([cx]), np.array([cy]))[0])
-            trunk_radius = float(rng.uniform(0.14, 0.35))
-            trunk_height = float(rng.uniform(2.5, 6.5))
-            crown_radius = float(rng.uniform(1.2, 3.6))
             cloud_parts.append(
                 _generate_tree_points(
                     rng=rng,
@@ -968,7 +1915,10 @@ def place_objects(
                     ground_z=ground_z,
                     trunk_radius=trunk_radius,
                     trunk_height=trunk_height,
-                    crown_radius=crown_radius,
+                    crown_type=crown_type,
+                    crown_diameter=crown_diameter,
+                    crown_bottom_height=crown_bottom_h,
+                    crown_top_height=crown_top_h,
                 )
             )
 
@@ -1049,30 +1999,51 @@ def place_objects(
                     )
 
     # ------------------------------------------------------------------
-    # Class 6: vehicles (compact cuboids on roads/plaza)
+    # Class 6: vehicles (car / truck / bus on roads and plazas)
     # ------------------------------------------------------------------
     n_vehicle_points = int(points_per_class.get(6, 0))
     if n_vehicle_points > 0 and len(artificial_zones) > 0:
+        vehicle_type_ratios = vehicle_type_ratios or dict(DEFAULT_VEHICLE_TYPE_RATIOS)
         n_vehicle_eff = max(1, min(num_vehicles, n_vehicle_points))
         per_vehicle = _split_count_evenly(n_vehicle_points, n_vehicle_eff)
+        per_type = _split_count_by_weights(
+            n_vehicle_eff,
+            [vehicle_type_ratios[vehicle_type] for vehicle_type in VEHICLE_TYPES],
+        )
+        vehicle_types: List[str] = []
+        for vehicle_type, type_count in zip(VEHICLE_TYPES, per_type):
+            vehicle_types.extend([vehicle_type] * int(type_count))
+        if len(vehicle_types) < n_vehicle_eff:
+            vehicle_types.extend(["car"] * (n_vehicle_eff - len(vehicle_types)))
+        vehicle_types = vehicle_types[:n_vehicle_eff]
+        rng.shuffle(vehicle_types)
+
         zone_prob = np.array([rect[2] * rect[3] for rect in artificial_rects], dtype=np.float64)
         zone_prob /= zone_prob.sum()
-        for n_pts in per_vehicle:
+        vehicle_rects: List[Rect] = []
+        for n_pts, vehicle_type in zip(per_vehicle, vehicle_types):
             zone_idx = int(rng.choice(len(artificial_zones), p=zone_prob))
             zone = artificial_zones[zone_idx]
             rect = zone["rect"]  # type: ignore[index]
 
-            length = float(rng.uniform(3.4, 5.8))
-            width = float(rng.uniform(1.6, 2.3))
-            height = float(rng.uniform(1.2, 2.2))
+            length, width, height = _sample_vehicle_dimensions(rng, vehicle_type=vehicle_type)
             margin = 0.6 * max(length, width)
-            cx, cy = _sample_inside_rect(rng, 1, rect, margin=margin)
-            cx_f, cy_f = float(cx[0]), float(cy[0])
+            cx_f, cy_f = float(rect[0]), float(rect[1])
+            candidate_rect: Rect | None = None
+            for _ in range(24):
+                cx, cy = _sample_inside_rect(rng, 1, rect, margin=margin)
+                cx_f, cy_f = float(cx[0]), float(cy[0])
+                candidate_rect = (cx_f, cy_f, length * 1.14, width * 1.24)
+                if all(_rect_overlap_ratio(candidate_rect, r) < 0.14 for r in vehicle_rects):
+                    break
 
             sx, sy = rect[2], rect[3]
             base_angle = 0.0 if sx >= sy else np.pi * 0.5
-            yaw = float(base_angle + rng.normal(0.0, 0.18))
+            yaw = float(base_angle + rng.normal(0.0, 0.16))
             base_z = float(zone["z0"]) + 0.06  # type: ignore[index]
+            if candidate_rect is None:
+                candidate_rect = (cx_f, cy_f, length * 1.14, width * 1.24)
+            vehicle_rects.append(candidate_rect)
 
             cloud_parts.append(
                 _generate_vehicle_points(
@@ -1085,25 +2056,97 @@ def place_objects(
                     width=width,
                     height=height,
                     yaw=yaw,
+                    vehicle_type=vehicle_type,
                 )
             )
 
     # ------------------------------------------------------------------
-    # Class 2: low vegetation (small offsets above ground)
+    # Class 2: low vegetation (shrubs + grassy patches)
     # ------------------------------------------------------------------
     n_low_veg = int(points_per_class.get(2, 0))
     if n_low_veg > 0:
         low_veg_forbidden = artificial_rects + building_rects
-        x, y = _sample_xy(
-            rng=rng,
-            n=n_low_veg,
+        shrub_count_eff, grass_patch_count_eff = _resolve_low_veg_counts(
+            n_low_veg_points=n_low_veg,
             area_size=area_size,
-            forbidden_rects=low_veg_forbidden,
-            margin=0.1,
+            rng=rng,
+            shrub_count=shrub_count,
+            grass_patch_count=grass_patch_count,
         )
-        z = terrain_fn(x, y) + rng.uniform(0.05, 0.85, size=n_low_veg)
-        labels = np.full(n_low_veg, 2, dtype=np.int32)
-        cloud_parts.append(np.column_stack((x, y, z, labels)))
+
+        if shrub_count_eff > 0 and grass_patch_count_eff > 0:
+            shrub_points_total, grass_points_total = _split_count_by_weights(
+                n_low_veg,
+                [0.58, 0.42],
+            )
+        elif shrub_count_eff > 0:
+            shrub_points_total = n_low_veg
+            grass_points_total = 0
+        else:
+            shrub_points_total = 0
+            grass_points_total = n_low_veg
+
+        if shrub_points_total > 0:
+            per_shrub = _split_count_random(
+                int(shrub_points_total),
+                int(shrub_count_eff),
+                rng=rng,
+                min_per_chunk=2,
+            )
+            shrub_parts: List[np.ndarray] = []
+            for n_pts in per_shrub:
+                cx, cy = _sample_single_xy(
+                    rng=rng,
+                    area_size=area_size,
+                    forbidden_rects=low_veg_forbidden,
+                    margin=0.1,
+                )
+                shrub_parts.append(
+                    _generate_shrub_points(
+                        rng=rng,
+                        terrain_fn=terrain_fn,
+                        n_points=int(n_pts),
+                        center_x=float(cx),
+                        center_y=float(cy),
+                        random_size=bool(random_shrub_size),
+                        shrub_max_diameter=float(shrub_max_diameter),
+                        shrub_max_top_height=float(shrub_max_top_height),
+                        shrub_min_bottom_height=float(shrub_min_bottom_height),
+                    )
+                )
+            if shrub_parts:
+                cloud_parts.append(np.vstack(shrub_parts))
+
+        if grass_points_total > 0:
+            per_grass = _split_count_random(
+                int(grass_points_total),
+                int(grass_patch_count_eff),
+                rng=rng,
+                min_per_chunk=2,
+            )
+            grass_parts: List[np.ndarray] = []
+            for n_pts in per_grass:
+                cx, cy = _sample_single_xy(
+                    rng=rng,
+                    area_size=area_size,
+                    forbidden_rects=low_veg_forbidden,
+                    margin=0.1,
+                )
+                grass_parts.append(
+                    _generate_grass_patch_points(
+                        rng=rng,
+                        terrain_fn=terrain_fn,
+                        n_points=int(n_pts),
+                        center_x=float(cx),
+                        center_y=float(cy),
+                        random_size=bool(random_grass_patch_size),
+                        grass_patch_max_size_x=float(grass_patch_max_size_x),
+                        grass_patch_max_size_y=float(grass_patch_max_size_y),
+                        grass_max_height=float(grass_max_height),
+                    )
+                )
+            if grass_parts:
+                cloud_parts.append(np.vstack(grass_parts))
 
     # ------------------------------------------------------------------
     # Class 7: artifacts (small random clusters and isolated points)
@@ -1282,6 +2325,26 @@ def _print_scene_params(
     terrain_relief: float,
     randomize_object_counts: bool,
     object_counts: Dict[str, int],
+    class_ratios: Dict[int, float],
+    vehicle_type_ratios: Dict[str, float],
+    tree_crown_type_ratios: Dict[str, float] | None,
+    tree_count_overridden: bool,
+    vehicle_count_overridden: bool,
+    tree_crown_type_distribution_overridden: bool,
+    random_tree_crown_size: bool,
+    tree_max_crown_diameter: float,
+    tree_max_crown_top_height: float,
+    tree_min_crown_bottom_height: float,
+    shrub_count_overridden: bool,
+    grass_patch_count_overridden: bool,
+    random_shrub_size: bool,
+    random_grass_patch_size: bool,
+    shrub_max_diameter: float,
+    shrub_max_top_height: float,
+    shrub_min_bottom_height: float,
+    grass_patch_max_size_x: float,
+    grass_patch_max_size_y: float,
+    grass_max_height: float,
 ) -> None:
     """Print generated scene parameters for easier reproducibility."""
     width_m, length_m = area_size
@@ -1294,6 +2357,60 @@ def _print_scene_params(
     print(f"Random seed: {seed}")
     print(f"Terrain relief [0..1]: {terrain_relief:.2f}")
     print(f"Object count mode: {mode}")
+    class_distribution = ", ".join(
+        f"{class_id}={class_ratios[class_id] * 100.0:.1f}%"
+        for class_id in CLASS_IDS
+    )
+    print(f"Class distribution: {class_distribution}")
+    vehicle_distribution = ", ".join(
+        f"{VEHICLE_TYPE_NAMES[vehicle_type]}={vehicle_type_ratios[vehicle_type] * 100.0:.1f}%"
+        for vehicle_type in VEHICLE_TYPES
+    )
+    print(f"Vehicle type distribution: {vehicle_distribution}")
+    if tree_crown_type_distribution_overridden and tree_crown_type_ratios is not None:
+        tree_distribution = ", ".join(
+            f"{TREE_CROWN_TYPE_NAMES[crown_type]}={tree_crown_type_ratios[crown_type] * 100.0:.1f}%"
+            for crown_type in TREE_CROWN_TYPES
+        )
+        print(f"Tree crown type distribution: {tree_distribution}")
+    else:
+        print("Tree crown type distribution: random per scene")
+    if tree_count_overridden:
+        print("Tree count mode: custom override")
+    if vehicle_count_overridden:
+        print("Vehicle count mode: custom override")
+    print(
+        "High vegetation modes: "
+        f"tree_crown_size={'random' if random_tree_crown_size else 'custom'}"
+    )
+    if not random_tree_crown_size:
+        print(
+            "Tree crown custom params: "
+            f"max_diameter={tree_max_crown_diameter:.2f} m, "
+            f"max_top={tree_max_crown_top_height:.2f} m, "
+            f"min_bottom={tree_min_crown_bottom_height:.2f} m"
+        )
+    print(
+        "Low vegetation modes: "
+        f"shrub_count={'custom' if shrub_count_overridden else 'random'}, "
+        f"shrub_size={'random' if random_shrub_size else 'custom'}, "
+        f"grass_patch_count={'custom' if grass_patch_count_overridden else 'random'}, "
+        f"grass_size={'random' if random_grass_patch_size else 'custom'}"
+    )
+    if not random_shrub_size:
+        print(
+            "Shrub custom params: "
+            f"max_diameter={shrub_max_diameter:.2f} m, "
+            f"max_top={shrub_max_top_height:.2f} m, "
+            f"min_bottom={shrub_min_bottom_height:.2f} m"
+        )
+    if not random_grass_patch_size:
+        print(
+            "Grass custom params: "
+            f"max_size_x={grass_patch_max_size_x:.2f} m, "
+            f"max_size_y={grass_patch_max_size_y:.2f} m, "
+            f"max_height={grass_max_height:.2f} m"
+        )
     print(
         "Object counts: "
         f"trees={object_counts['num_trees']}, "
@@ -1314,6 +2431,25 @@ def _run_pipeline(
     terrain_relief: float,
     randomize_object_counts: bool,
     seed: int,
+    class_percentages: Sequence[float] | Dict[int, float] | None = None,
+    tree_count: int | None = None,
+    tree_crown_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    random_tree_crown_size: bool = True,
+    tree_max_crown_diameter: float = HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
+    tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
+    tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+    vehicle_count: int | None = None,
+    vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    shrub_count: int | None = None,
+    random_shrub_size: bool = True,
+    shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
+    shrub_max_top_height: float = LOW_VEG_DEFAULTS["shrub_max_top_height"],
+    shrub_min_bottom_height: float = LOW_VEG_DEFAULTS["shrub_min_bottom_height"],
+    grass_patch_count: int | None = None,
+    random_grass_patch_size: bool = True,
+    grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
+    grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
+    grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
 ) -> np.ndarray:
     """
     Internal execution pipeline with configurable runtime switches.
@@ -1323,15 +2459,64 @@ def _run_pipeline(
     _validate_positive(area_width, "area_width")
     _validate_positive(area_length, "area_length")
     _validate_unit_interval(terrain_relief, "terrain_relief")
+    _validate_positive(tree_max_crown_diameter, "tree_max_crown_diameter")
+    _validate_positive(tree_max_crown_top_height, "tree_max_crown_top_height")
+    if tree_min_crown_bottom_height < 0.0:
+        raise ValueError("`tree_min_crown_bottom_height` must be >= 0.")
+    if tree_min_crown_bottom_height >= tree_max_crown_top_height:
+        raise ValueError(
+            "`tree_min_crown_bottom_height` must be strictly less than "
+            "`tree_max_crown_top_height`."
+        )
+    _validate_positive(shrub_max_diameter, "shrub_max_diameter")
+    _validate_positive(shrub_max_top_height, "shrub_max_top_height")
+    if shrub_min_bottom_height < 0.0:
+        raise ValueError("`shrub_min_bottom_height` must be >= 0.")
+    if shrub_min_bottom_height >= shrub_max_top_height:
+        raise ValueError(
+            "`shrub_min_bottom_height` must be strictly less than `shrub_max_top_height`."
+        )
+    _validate_positive(grass_patch_max_size_x, "grass_patch_max_size_x")
+    _validate_positive(grass_patch_max_size_y, "grass_patch_max_size_y")
+    _validate_positive(grass_max_height, "grass_max_height")
+    if shrub_count is not None and int(shrub_count) <= 0:
+        raise ValueError("`shrub_count` must be > 0 when provided.")
+    if grass_patch_count is not None and int(grass_patch_count) <= 0:
+        raise ValueError("`grass_patch_count` must be > 0 when provided.")
+    if tree_count is not None and int(tree_count) <= 0:
+        raise ValueError("`tree_count` must be > 0 when provided.")
 
     # ----------------------------- Scene config -----------------------------
     area_size = (float(area_width), float(area_length))
+    class_ratios = _class_ratios_from_percentages(class_percentages)
+    vehicle_type_ratios = _vehicle_type_ratios_from_percentages(vehicle_type_percentages)
+    tree_crown_type_distribution_overridden = tree_crown_type_percentages is not None
+    tree_crown_type_ratios = (
+        _tree_crown_type_ratios_from_percentages(tree_crown_type_percentages)
+        if tree_crown_type_distribution_overridden
+        else None
+    )
     scene_rng = np.random.default_rng(seed + 100)
     object_counts = _generate_object_counts(
         area_size=area_size,
         rng=scene_rng,
         randomize_counts=randomize_object_counts,
     )
+    tree_count_overridden = tree_count is not None
+    vehicle_count_overridden = vehicle_count is not None
+    shrub_count_overridden = shrub_count is not None
+    grass_patch_count_overridden = grass_patch_count is not None
+    if tree_count_overridden:
+        tree_count_int = int(tree_count)
+        if tree_count_int <= 0:
+            raise ValueError("`tree_count` must be > 0 when provided.")
+        object_counts["num_trees"] = tree_count_int
+    if vehicle_count_overridden:
+        vehicle_count_int = int(vehicle_count)
+        if vehicle_count_int <= 0:
+            raise ValueError("`vehicle_count` must be > 0 when provided.")
+        object_counts["num_vehicles"] = vehicle_count_int
+
     num_trees = object_counts["num_trees"]
     num_buildings = object_counts["num_buildings"]
     num_structures = object_counts["num_structures"]
@@ -1343,19 +2528,27 @@ def _run_pipeline(
         terrain_relief=terrain_relief,
         randomize_object_counts=randomize_object_counts,
         object_counts=object_counts,
+        class_ratios=class_ratios,
+        vehicle_type_ratios=vehicle_type_ratios,
+        tree_crown_type_ratios=tree_crown_type_ratios,
+        tree_count_overridden=tree_count_overridden,
+        vehicle_count_overridden=vehicle_count_overridden,
+        tree_crown_type_distribution_overridden=tree_crown_type_distribution_overridden,
+        random_tree_crown_size=bool(random_tree_crown_size),
+        tree_max_crown_diameter=float(tree_max_crown_diameter),
+        tree_max_crown_top_height=float(tree_max_crown_top_height),
+        tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
+        shrub_count_overridden=shrub_count_overridden,
+        grass_patch_count_overridden=grass_patch_count_overridden,
+        random_shrub_size=bool(random_shrub_size),
+        random_grass_patch_size=bool(random_grass_patch_size),
+        shrub_max_diameter=float(shrub_max_diameter),
+        shrub_max_top_height=float(shrub_max_top_height),
+        shrub_min_bottom_height=float(shrub_min_bottom_height),
+        grass_patch_max_size_x=float(grass_patch_max_size_x),
+        grass_patch_max_size_y=float(grass_patch_max_size_y),
+        grass_max_height=float(grass_max_height),
     )
-
-    # Proportional allocation across all 8 classes.
-    class_ratios = {
-        0: 0.38,
-        1: 0.13,
-        2: 0.16,
-        3: 0.14,
-        4: 0.10,
-        5: 0.04,
-        6: 0.03,
-        7: 0.02,
-    }
 
     points_per_class = allocate_points(total_points=total_points, class_ratios=class_ratios)
 
@@ -1378,7 +2571,23 @@ def _run_pipeline(
         num_buildings=num_buildings,
         num_structures=num_structures,
         num_vehicles=num_vehicles,
+        vehicle_type_ratios=vehicle_type_ratios,
+        tree_crown_type_ratios=tree_crown_type_ratios,
+        random_tree_crown_size=bool(random_tree_crown_size),
+        tree_max_crown_diameter=float(tree_max_crown_diameter),
+        tree_max_crown_top_height=float(tree_max_crown_top_height),
+        tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
         num_artifact_clusters=num_artifact_clusters,
+        shrub_count=(int(shrub_count) if shrub_count is not None else None),
+        random_shrub_size=bool(random_shrub_size),
+        shrub_max_diameter=float(shrub_max_diameter),
+        shrub_max_top_height=float(shrub_max_top_height),
+        shrub_min_bottom_height=float(shrub_min_bottom_height),
+        grass_patch_count=(int(grass_patch_count) if grass_patch_count is not None else None),
+        random_grass_patch_size=bool(random_grass_patch_size),
+        grass_patch_max_size_x=float(grass_patch_max_size_x),
+        grass_patch_max_size_y=float(grass_patch_max_size_y),
+        grass_max_height=float(grass_max_height),
         seed=seed + 1,
     )
 
@@ -1421,11 +2630,37 @@ def generate_point_cloud(
     terrain_relief: float = 1.0,
     randomize_object_counts: bool = True,
     seed: int = 12,
+    class_percentages: Sequence[float] | Dict[int, float] | None = None,
+    tree_count: int | None = None,
+    tree_crown_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    random_tree_crown_size: bool = True,
+    tree_max_crown_diameter: float = HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
+    tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
+    tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+    vehicle_count: int | None = None,
+    vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    shrub_count: int | None = None,
+    random_shrub_size: bool = True,
+    shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
+    shrub_max_top_height: float = LOW_VEG_DEFAULTS["shrub_max_top_height"],
+    shrub_min_bottom_height: float = LOW_VEG_DEFAULTS["shrub_min_bottom_height"],
+    grass_patch_count: int | None = None,
+    random_grass_patch_size: bool = True,
+    grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
+    grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
+    grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
 ) -> np.ndarray:
     """
     Public API for programmatic generation without side effects:
       - no matplotlib window
       - no CSV/PLY files written
+      - optional custom class percentages for classes 0..7
+      - optional custom number of tree instances
+      - optional custom tree crown type percentages
+      - optional custom high vegetation crown sizing controls
+      - optional custom number of vehicle instances
+      - optional custom vehicle type percentages [car, truck, bus]
+      - optional custom low vegetation controls (shrubs + grass patches)
     Returns point cloud array with shape (N, 4): x, y, z, label.
     """
     return _run_pipeline(
@@ -1438,6 +2673,25 @@ def generate_point_cloud(
         terrain_relief=float(terrain_relief),
         randomize_object_counts=bool(randomize_object_counts),
         seed=int(seed),
+        class_percentages=class_percentages,
+        tree_count=tree_count,
+        tree_crown_type_percentages=tree_crown_type_percentages,
+        random_tree_crown_size=bool(random_tree_crown_size),
+        tree_max_crown_diameter=float(tree_max_crown_diameter),
+        tree_max_crown_top_height=float(tree_max_crown_top_height),
+        tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
+        vehicle_count=vehicle_count,
+        vehicle_type_percentages=vehicle_type_percentages,
+        shrub_count=shrub_count,
+        random_shrub_size=bool(random_shrub_size),
+        shrub_max_diameter=float(shrub_max_diameter),
+        shrub_max_top_height=float(shrub_max_top_height),
+        shrub_min_bottom_height=float(shrub_min_bottom_height),
+        grass_patch_count=grass_patch_count,
+        random_grass_patch_size=bool(random_grass_patch_size),
+        grass_patch_max_size_x=float(grass_patch_max_size_x),
+        grass_patch_max_size_y=float(grass_patch_max_size_y),
+        grass_max_height=float(grass_max_height),
     )
 
 
@@ -1448,6 +2702,25 @@ def main(
     terrain_relief: float = 1.0,
     randomize_object_counts: bool = True,
     seed: int = 12,
+    class_percentages: Sequence[float] | Dict[int, float] | None = None,
+    tree_count: int | None = None,
+    tree_crown_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    random_tree_crown_size: bool = True,
+    tree_max_crown_diameter: float = HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
+    tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
+    tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+    vehicle_count: int | None = None,
+    vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    shrub_count: int | None = None,
+    random_shrub_size: bool = True,
+    shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
+    shrub_max_top_height: float = LOW_VEG_DEFAULTS["shrub_max_top_height"],
+    shrub_min_bottom_height: float = LOW_VEG_DEFAULTS["shrub_min_bottom_height"],
+    grass_patch_count: int | None = None,
+    random_grass_patch_size: bool = True,
+    grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
+    grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
+    grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
 ) -> np.ndarray:
     """
     Entry point required by task.
@@ -1456,6 +2729,10 @@ def main(
       - uses area 240x220 meters
       - uses mountainous terrain relief (`terrain_relief=1.0`)
       - randomizes object counts based on area
+      - uses default class distribution unless custom percentages are provided
+      - uses default high-vegetation generation unless custom values are provided
+      - uses default vehicle count and type distribution unless custom values are provided
+      - uses default low-vegetation generation unless custom values are provided
       - prints stats
       - saves CSV + PLY
       - opens interactive visualization
@@ -1470,6 +2747,25 @@ def main(
         terrain_relief=float(terrain_relief),
         randomize_object_counts=bool(randomize_object_counts),
         seed=int(seed),
+        class_percentages=class_percentages,
+        tree_count=tree_count,
+        tree_crown_type_percentages=tree_crown_type_percentages,
+        random_tree_crown_size=bool(random_tree_crown_size),
+        tree_max_crown_diameter=float(tree_max_crown_diameter),
+        tree_max_crown_top_height=float(tree_max_crown_top_height),
+        tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
+        vehicle_count=vehicle_count,
+        vehicle_type_percentages=vehicle_type_percentages,
+        shrub_count=shrub_count,
+        random_shrub_size=bool(random_shrub_size),
+        shrub_max_diameter=float(shrub_max_diameter),
+        shrub_max_top_height=float(shrub_max_top_height),
+        shrub_min_bottom_height=float(shrub_min_bottom_height),
+        grass_patch_count=grass_patch_count,
+        random_grass_patch_size=bool(random_grass_patch_size),
+        grass_patch_max_size_x=float(grass_patch_max_size_x),
+        grass_patch_max_size_y=float(grass_patch_max_size_y),
+        grass_max_height=float(grass_max_height),
     )
 
 
@@ -1518,6 +2814,139 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--class-percentages",
+        type=float,
+        nargs=len(CLASS_IDS),
+        metavar="PCT",
+        help=(
+            "Optional custom class shares in percent for classes 0..7 "
+            f"({len(CLASS_IDS)} values expected). "
+            "Example: --class-percentages 38 13 16 14 10 4 3 2"
+        ),
+    )
+    parser.add_argument(
+        "--tree-count",
+        type=int,
+        help="Optional custom number of generated tree instances (class 3).",
+    )
+    parser.add_argument(
+        "--tree-crown-type-percentages",
+        type=float,
+        nargs=len(TREE_CROWN_TYPES),
+        metavar="PCT",
+        help=(
+            "Optional tree crown type shares in percent for "
+            "[spherical pyramidal spreading weeping columnar umbrella]. "
+            "Example: --tree-crown-type-percentages 30 18 20 10 12 10"
+        ),
+    )
+    parser.add_argument(
+        "--random-tree-crown-size",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable randomized tree crown sizes. Disable to use custom tree crown parameters "
+            "(max diameter, max top height, min bottom height)."
+        ),
+    )
+    parser.add_argument(
+        "--tree-max-crown-diameter",
+        type=float,
+        default=HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
+        help="Custom tree max crown diameter in meters.",
+    )
+    parser.add_argument(
+        "--tree-max-crown-top-height",
+        type=float,
+        default=HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
+        help="Custom tree max crown top height above ground in meters.",
+    )
+    parser.add_argument(
+        "--tree-min-crown-bottom-height",
+        type=float,
+        default=HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+        help="Custom tree minimum crown bottom height above ground in meters.",
+    )
+    parser.add_argument(
+        "--vehicle-count",
+        type=int,
+        help="Optional custom number of generated vehicle instances.",
+    )
+    parser.add_argument(
+        "--vehicle-type-percentages",
+        type=float,
+        nargs=len(VEHICLE_TYPES),
+        metavar="PCT",
+        help=(
+            "Optional vehicle type shares in percent for [car truck bus]. "
+            "Example: --vehicle-type-percentages 72 18 10"
+        ),
+    )
+    parser.add_argument(
+        "--shrub-count",
+        type=int,
+        help="Optional custom number of shrub clusters for class 2 (low vegetation).",
+    )
+    parser.add_argument(
+        "--random-shrub-size",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable randomized shrub sizes. Disable to use custom shrub parameters "
+            "(max diameter, max top height, min bottom height)."
+        ),
+    )
+    parser.add_argument(
+        "--shrub-max-diameter",
+        type=float,
+        default=LOW_VEG_DEFAULTS["shrub_max_diameter"],
+        help="Custom shrub max crown diameter in meters.",
+    )
+    parser.add_argument(
+        "--shrub-max-top-height",
+        type=float,
+        default=LOW_VEG_DEFAULTS["shrub_max_top_height"],
+        help="Custom shrub max top height above ground in meters.",
+    )
+    parser.add_argument(
+        "--shrub-min-bottom-height",
+        type=float,
+        default=LOW_VEG_DEFAULTS["shrub_min_bottom_height"],
+        help="Custom shrub minimum bottom crown height above ground in meters.",
+    )
+    parser.add_argument(
+        "--grass-patch-count",
+        type=int,
+        help="Optional custom number of grass patches for class 2 (low vegetation).",
+    )
+    parser.add_argument(
+        "--random-grass-patch-size",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable randomized grass patch sizes. Disable to use custom patch size "
+            "(max X/Y spread and max grass height)."
+        ),
+    )
+    parser.add_argument(
+        "--grass-patch-max-size-x",
+        type=float,
+        default=LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
+        help="Custom grass patch max spread along X in meters.",
+    )
+    parser.add_argument(
+        "--grass-patch-max-size-y",
+        type=float,
+        default=LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
+        help="Custom grass patch max spread along Y in meters.",
+    )
+    parser.add_argument(
+        "--grass-max-height",
+        type=float,
+        default=LOW_VEG_DEFAULTS["grass_max_height"],
+        help="Custom max grass height above ground in meters.",
+    )
+    parser.add_argument(
         "--no-visualize",
         action="store_true",
         help="Disable interactive visualization window.",
@@ -1550,6 +2979,25 @@ def cli(argv: Sequence[str] | None = None) -> int:
         terrain_relief=float(args.terrain_relief),
         randomize_object_counts=bool(args.random_object_counts),
         seed=int(args.seed),
+        class_percentages=args.class_percentages,
+        tree_count=args.tree_count,
+        tree_crown_type_percentages=args.tree_crown_type_percentages,
+        random_tree_crown_size=bool(args.random_tree_crown_size),
+        tree_max_crown_diameter=float(args.tree_max_crown_diameter),
+        tree_max_crown_top_height=float(args.tree_max_crown_top_height),
+        tree_min_crown_bottom_height=float(args.tree_min_crown_bottom_height),
+        vehicle_count=args.vehicle_count,
+        vehicle_type_percentages=args.vehicle_type_percentages,
+        shrub_count=args.shrub_count,
+        random_shrub_size=bool(args.random_shrub_size),
+        shrub_max_diameter=float(args.shrub_max_diameter),
+        shrub_max_top_height=float(args.shrub_max_top_height),
+        shrub_min_bottom_height=float(args.shrub_min_bottom_height),
+        grass_patch_count=args.grass_patch_count,
+        random_grass_patch_size=bool(args.random_grass_patch_size),
+        grass_patch_max_size_x=float(args.grass_patch_max_size_x),
+        grass_patch_max_size_y=float(args.grass_patch_max_size_y),
+        grass_max_height=float(args.grass_max_height),
     )
     return 0
 
