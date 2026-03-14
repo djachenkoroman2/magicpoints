@@ -6,7 +6,7 @@ import re
 import struct
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -59,6 +59,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QOpenGLWidget,
+    QScrollArea,
     QTabWidget,
     QSpinBox,
     QStyle,
@@ -726,6 +727,78 @@ FALLBACK_BUILDING_DEFAULTS: Dict[str, int | bool] = {
     "building_floor_max": 9,
     "building_random_yaw": True,
 }
+FALLBACK_STRUCTURE_TYPES: Tuple[str, ...] = (
+    "fence",
+    "railing",
+    "enclosure",
+    "guardrail",
+    "retaining_wall",
+    "parapet",
+    "stone_wall",
+    "pole_support",
+    "lamp",
+    "road_sign",
+    "traffic_light",
+    "bench",
+    "trash_bin",
+    "bike_rack",
+    "bollard",
+    "fountain",
+    "pedestal",
+    "monument",
+    "stairs",
+    "ramp",
+    "platform",
+    "footbridge",
+)
+FALLBACK_STRUCTURE_TYPE_NAMES: Dict[str, str] = {
+    "fence": "Fence",
+    "railing": "Railing",
+    "enclosure": "Enclosure",
+    "guardrail": "Guardrail",
+    "retaining_wall": "Retaining wall",
+    "parapet": "Parapet",
+    "stone_wall": "Low stone wall",
+    "pole_support": "Pole / support",
+    "lamp": "Lamp",
+    "road_sign": "Road sign",
+    "traffic_light": "Traffic light",
+    "bench": "Bench",
+    "trash_bin": "Trash bin",
+    "bike_rack": "Bike rack",
+    "bollard": "Bollard",
+    "fountain": "Fountain",
+    "pedestal": "Pedestal",
+    "monument": "Small monument",
+    "stairs": "Stairs",
+    "ramp": "Ramp",
+    "platform": "Platform",
+    "footbridge": "Open footbridge",
+}
+FALLBACK_STRUCTURE_TYPE_PERCENTAGES: Tuple[float, ...] = (
+    12.0,
+    7.0,
+    6.0,
+    6.0,
+    6.0,
+    4.0,
+    5.0,
+    7.0,
+    6.0,
+    5.0,
+    3.0,
+    5.0,
+    4.0,
+    3.0,
+    3.0,
+    2.0,
+    2.0,
+    2.0,
+    3.0,
+    2.0,
+    3.0,
+    4.0,
+)
 FALLBACK_TREE_CROWN_TYPES: Tuple[str, ...] = (
     "spherical",
     "pyramidal",
@@ -767,6 +840,10 @@ class SyntheticGenerationParams:
     building_floor_min: int = int(FALLBACK_BUILDING_DEFAULTS["building_floor_min"])
     building_floor_max: int = int(FALLBACK_BUILDING_DEFAULTS["building_floor_max"])
     building_random_yaw: bool = bool(FALLBACK_BUILDING_DEFAULTS["building_random_yaw"])
+    custom_structure_count: bool = False
+    structure_count: int = 10
+    custom_structure_type_distribution: bool = False
+    structure_type_percentages: Tuple[float, ...] = FALLBACK_STRUCTURE_TYPE_PERCENTAGES
     custom_tree_count: bool = False
     tree_count: int = 70
     custom_tree_crown_type_distribution: bool = False
@@ -804,17 +881,21 @@ class SyntheticGenerationDialog(QDialog):
         building_roof_type_names: Optional[Dict[str, str]] = None,
         default_building_roof_type_percentages: Optional[Sequence[float]] = None,
         building_defaults: Optional[Dict[str, int | bool]] = None,
+        structure_type_names: Optional[Dict[str, str]] = None,
+        default_structure_type_percentages: Optional[Sequence[float]] = None,
         tree_crown_type_names: Optional[Dict[str, str]] = None,
         default_tree_crown_type_percentages: Optional[Sequence[float]] = None,
         high_veg_defaults: Optional[Dict[str, float]] = None,
         vehicle_type_names: Optional[Dict[str, str]] = None,
         default_vehicle_type_percentages: Optional[Sequence[float]] = None,
         low_veg_defaults: Optional[Dict[str, float]] = None,
+        synthetic_module=None,
         parent=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Generate Synthetic Point Cloud")
         self.setModal(True)
+        self._synthetic_module = synthetic_module
 
         params = default_params or SyntheticGenerationParams()
         self._class_names = self._normalize_class_names(class_names)
@@ -843,6 +924,18 @@ class SyntheticGenerationDialog(QDialog):
             values=params.building_roof_type_percentages,
             class_count=len(self._building_roof_types),
             fallback=fallback_building_roof_percentages,
+        )
+        self._structure_type_names = self._normalize_structure_type_names(structure_type_names)
+        self._structure_types = list(FALLBACK_STRUCTURE_TYPES)
+        fallback_structure_percentages = self._normalize_percentages(
+            values=default_structure_type_percentages,
+            class_count=len(self._structure_types),
+            fallback=FALLBACK_STRUCTURE_TYPE_PERCENTAGES,
+        )
+        initial_structure_percentages = self._normalize_percentages(
+            values=params.structure_type_percentages,
+            class_count=len(self._structure_types),
+            fallback=fallback_structure_percentages,
         )
         self._tree_crown_type_names = self._normalize_tree_crown_type_names(
             tree_crown_type_names
@@ -1048,6 +1141,34 @@ class SyntheticGenerationDialog(QDialog):
         self.building_random_yaw_check.setChecked(initial_building_random_yaw)
 
         self.building_validation_label = QLabel(self)
+        self.custom_structure_count_check = QCheckBox("Use custom structure count", self)
+        self.custom_structure_count_check.setChecked(bool(params.custom_structure_count))
+        self.custom_structure_count_check.toggled.connect(self._update_structure_settings_state)
+
+        self.structure_count_spin = QSpinBox(self)
+        self.structure_count_spin.setRange(1, 1_000_000)
+        self.structure_count_spin.setSingleStep(1)
+        self.structure_count_spin.setValue(max(1, int(params.structure_count)))
+
+        self.custom_structure_type_check = QCheckBox(
+            "Use custom structure type distribution (%)",
+            self,
+        )
+        self.custom_structure_type_check.setChecked(bool(params.custom_structure_type_distribution))
+        self.custom_structure_type_check.toggled.connect(self._update_structure_settings_state)
+
+        self.structure_type_percentage_spins: Dict[str, QDoubleSpinBox] = {}
+        for idx, structure_type in enumerate(self._structure_types):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" %")
+            spin.setValue(float(initial_structure_percentages[idx]))
+            spin.valueChanged.connect(self._update_structure_distribution_summary)
+            self.structure_type_percentage_spins[structure_type] = spin
+
+        self.structure_distribution_sum_label = QLabel(self)
         self.custom_tree_count_check = QCheckBox("Use custom tree count", self)
         self.custom_tree_count_check.setChecked(bool(params.custom_tree_count))
         self.custom_tree_count_check.toggled.connect(self._update_high_vegetation_state)
@@ -1240,6 +1361,17 @@ class SyntheticGenerationDialog(QDialog):
         form_building.addRow("", self.building_random_yaw_check)
         form_building.addRow("Validation:", self.building_validation_label)
 
+        form_structure = QFormLayout()
+        form_structure.addRow("", self.custom_structure_count_check)
+        form_structure.addRow("Structure instances:", self.structure_count_spin)
+        form_structure.addRow("", self.custom_structure_type_check)
+        for structure_type in self._structure_types:
+            form_structure.addRow(
+                f"{self._structure_type_names[structure_type]}:",
+                self.structure_type_percentage_spins[structure_type],
+            )
+        form_structure.addRow("Type sum:", self.structure_distribution_sum_label)
+
         form_high_veg = QFormLayout()
         form_high_veg.addRow("", self.custom_tree_count_check)
         form_high_veg.addRow("Tree instances:", self.tree_count_spin)
@@ -1298,6 +1430,18 @@ class SyntheticGenerationDialog(QDialog):
         building_layout.addStretch(1)
         tabs.addTab(building_tab, "Buildings")
 
+        structure_tab = QWidget(self)
+        structure_container = QWidget(self)
+        structure_container_layout = QVBoxLayout(structure_container)
+        structure_container_layout.addLayout(form_structure)
+        structure_container_layout.addStretch(1)
+        structure_scroll = QScrollArea(structure_tab)
+        structure_scroll.setWidgetResizable(True)
+        structure_scroll.setWidget(structure_container)
+        structure_layout = QVBoxLayout(structure_tab)
+        structure_layout.addWidget(structure_scroll)
+        tabs.addTab(structure_tab, "Structures")
+
         high_veg_tab = QWidget(self)
         high_veg_layout = QVBoxLayout(high_veg_tab)
         high_veg_layout.addLayout(form_high_veg)
@@ -1328,6 +1472,16 @@ class SyntheticGenerationDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.import_config_button = buttons.addButton(
+            "Import Configuration...",
+            QDialogButtonBox.ActionRole,
+        )
+        self.import_config_button.clicked.connect(self.import_configuration)
+        self.export_config_button = buttons.addButton(
+            "Export Configuration...",
+            QDialogButtonBox.ActionRole,
+        )
+        self.export_config_button.clicked.connect(self.export_configuration)
         self.ok_button = buttons.button(QDialogButtonBox.Ok)
 
         layout = QVBoxLayout(self)
@@ -1338,13 +1492,296 @@ class SyntheticGenerationDialog(QDialog):
 
         self._update_class_distribution_state()
         self._update_building_state()
+        self._update_structure_settings_state()
         self._update_high_vegetation_state()
         self._update_vehicle_settings_state()
         self._update_low_vegetation_state()
         self._update_class_distribution_summary()
         self._update_building_distribution_summary()
+        self._update_structure_distribution_summary()
         self._update_tree_crown_distribution_summary()
         self._update_vehicle_distribution_summary()
+
+    def _resolve_synthetic_module(self):
+        if self._synthetic_module is not None:
+            return self._synthetic_module
+        try:
+            import synthetic_labeled_point_cloud as synthetic_module
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Generator Error",
+                f"Failed to import synthetic_labeled_point_cloud.py:\n{exc}",
+            )
+            return None
+        self._synthetic_module = synthetic_module
+        return self._synthetic_module
+
+    def _apply_params(self, params: SyntheticGenerationParams) -> None:
+        def _set_spin_value(spin_box, value, name: str) -> None:
+            minimum = spin_box.minimum()
+            maximum = spin_box.maximum()
+            if value < minimum or value > maximum:
+                raise ValueError(
+                    f"`{name}` is outside the supported dialog range [{minimum}, {maximum}]: {value}."
+                )
+            spin_box.setValue(value)
+
+        class_percentages = self._normalize_percentages(
+            values=params.class_percentages,
+            class_count=len(self._class_ids),
+            fallback=FALLBACK_CLASS_PERCENTAGES,
+        )
+        building_roof_percentages = self._normalize_percentages(
+            values=params.building_roof_type_percentages,
+            class_count=len(self._building_roof_types),
+            fallback=FALLBACK_BUILDING_ROOF_TYPE_PERCENTAGES,
+        )
+        structure_percentages = self._normalize_percentages(
+            values=params.structure_type_percentages,
+            class_count=len(self._structure_types),
+            fallback=FALLBACK_STRUCTURE_TYPE_PERCENTAGES,
+        )
+        tree_crown_percentages = self._normalize_percentages(
+            values=params.tree_crown_type_percentages,
+            class_count=len(self._tree_crown_types),
+            fallback=FALLBACK_TREE_CROWN_TYPE_PERCENTAGES,
+        )
+        vehicle_percentages = self._normalize_percentages(
+            values=params.vehicle_type_percentages,
+            class_count=len(self._vehicle_types),
+            fallback=FALLBACK_VEHICLE_TYPE_PERCENTAGES,
+        )
+
+        _set_spin_value(self.total_points_spin, int(params.total_points), "total_points")
+        _set_spin_value(self.area_width_spin, float(params.area_width), "area_width")
+        _set_spin_value(self.area_length_spin, float(params.area_length), "area_length")
+        _set_spin_value(self.terrain_relief_spin, float(params.terrain_relief), "terrain_relief")
+        _set_spin_value(self.seed_spin, int(params.seed), "seed")
+        self.random_counts_check.setChecked(bool(params.randomize_object_counts))
+        self.custom_distribution_check.setChecked(bool(params.custom_class_distribution))
+        for index, class_id in enumerate(self._class_ids):
+            _set_spin_value(
+                self.class_percentage_spins[class_id],
+                float(class_percentages[index]),
+                f"class_percentages[{class_id}]",
+            )
+
+        self.custom_building_count_check.setChecked(bool(params.custom_building_count))
+        _set_spin_value(self.building_count_spin, int(params.building_count), "building_count")
+        self.custom_building_roof_type_check.setChecked(
+            bool(params.custom_building_roof_type_distribution)
+        )
+        for index, roof_type in enumerate(self._building_roof_types):
+            _set_spin_value(
+                self.building_roof_type_percentage_spins[roof_type],
+                float(building_roof_percentages[index]),
+                f"building_roof_type_percentages[{roof_type}]",
+            )
+        floor_min = int(params.building_floor_min)
+        floor_max = int(params.building_floor_max)
+        _set_spin_value(self.building_floor_min_spin, floor_min, "building_floor_min")
+        _set_spin_value(self.building_floor_max_spin, floor_max, "building_floor_max")
+        self.building_random_yaw_check.setChecked(bool(params.building_random_yaw))
+
+        self.custom_structure_count_check.setChecked(bool(params.custom_structure_count))
+        _set_spin_value(self.structure_count_spin, int(params.structure_count), "structure_count")
+        self.custom_structure_type_check.setChecked(bool(params.custom_structure_type_distribution))
+        for index, structure_type in enumerate(self._structure_types):
+            _set_spin_value(
+                self.structure_type_percentage_spins[structure_type],
+                float(structure_percentages[index]),
+                f"structure_type_percentages[{structure_type}]",
+            )
+
+        self.custom_tree_count_check.setChecked(bool(params.custom_tree_count))
+        _set_spin_value(self.tree_count_spin, int(params.tree_count), "tree_count")
+        self.custom_tree_crown_type_check.setChecked(
+            bool(params.custom_tree_crown_type_distribution)
+        )
+        for index, crown_type in enumerate(self._tree_crown_types):
+            _set_spin_value(
+                self.tree_crown_type_percentage_spins[crown_type],
+                float(tree_crown_percentages[index]),
+                f"tree_crown_type_percentages[{crown_type}]",
+            )
+        self.random_tree_crown_size_check.setChecked(bool(params.random_tree_crown_size))
+        _set_spin_value(
+            self.tree_max_crown_diameter_spin,
+            float(params.tree_max_crown_diameter),
+            "tree_max_crown_diameter",
+        )
+        _set_spin_value(
+            self.tree_max_crown_top_height_spin,
+            float(params.tree_max_crown_top_height),
+            "tree_max_crown_top_height",
+        )
+        _set_spin_value(
+            self.tree_min_crown_bottom_height_spin,
+            float(params.tree_min_crown_bottom_height),
+            "tree_min_crown_bottom_height",
+        )
+
+        self.custom_vehicle_count_check.setChecked(bool(params.custom_vehicle_count))
+        _set_spin_value(self.vehicle_count_spin, int(params.vehicle_count), "vehicle_count")
+        self.custom_vehicle_type_check.setChecked(bool(params.custom_vehicle_type_distribution))
+        for index, vehicle_type in enumerate(self._vehicle_types):
+            _set_spin_value(
+                self.vehicle_type_percentage_spins[vehicle_type],
+                float(vehicle_percentages[index]),
+                f"vehicle_type_percentages[{vehicle_type}]",
+            )
+
+        self.custom_shrub_count_check.setChecked(bool(params.custom_shrub_count))
+        _set_spin_value(self.shrub_count_spin, int(params.shrub_count), "shrub_count")
+        self.random_shrub_size_check.setChecked(bool(params.random_shrub_size))
+        _set_spin_value(
+            self.shrub_max_diameter_spin,
+            float(params.shrub_max_diameter),
+            "shrub_max_diameter",
+        )
+        _set_spin_value(
+            self.shrub_max_top_height_spin,
+            float(params.shrub_max_top_height),
+            "shrub_max_top_height",
+        )
+        _set_spin_value(
+            self.shrub_min_bottom_height_spin,
+            float(params.shrub_min_bottom_height),
+            "shrub_min_bottom_height",
+        )
+
+        self.custom_grass_patch_count_check.setChecked(bool(params.custom_grass_patch_count))
+        _set_spin_value(
+            self.grass_patch_count_spin,
+            int(params.grass_patch_count),
+            "grass_patch_count",
+        )
+        self.random_grass_patch_size_check.setChecked(bool(params.random_grass_patch_size))
+        _set_spin_value(
+            self.grass_patch_max_size_x_spin,
+            float(params.grass_patch_max_size_x),
+            "grass_patch_max_size_x",
+        )
+        _set_spin_value(
+            self.grass_patch_max_size_y_spin,
+            float(params.grass_patch_max_size_y),
+            "grass_patch_max_size_y",
+        )
+        _set_spin_value(
+            self.grass_max_height_spin,
+            float(params.grass_max_height),
+            "grass_max_height",
+        )
+
+        self._update_class_distribution_state()
+        self._update_building_state()
+        self._update_structure_settings_state()
+        self._update_high_vegetation_state()
+        self._update_vehicle_settings_state()
+        self._update_low_vegetation_state()
+        self._update_class_distribution_summary()
+        self._update_building_distribution_summary()
+        self._update_structure_distribution_summary()
+        self._update_tree_crown_distribution_summary()
+        self._update_vehicle_distribution_summary()
+
+    def _collect_validation_errors(self) -> List[str]:
+        errors: List[str] = []
+        if not self._is_class_distribution_valid():
+            errors.append(
+                "When custom class distribution is enabled, class percentages must sum to 100%."
+            )
+        if not self._is_building_roof_distribution_valid():
+            errors.append(
+                "When custom building roof type distribution is enabled, percentages must sum to 100%."
+            )
+        if not self._is_structure_distribution_valid():
+            errors.append(
+                "When custom structure type distribution is enabled, percentages must sum to 100%."
+            )
+        if not self._is_tree_crown_distribution_valid():
+            errors.append(
+                "When custom tree crown type distribution is enabled, percentages must sum to 100%."
+            )
+        if not self._is_vehicle_distribution_valid():
+            errors.append(
+                "When custom vehicle type distribution is enabled, vehicle type percentages must sum to 100%."
+            )
+        building_error = self._building_validation_error()
+        if building_error is not None:
+            errors.append(building_error)
+        high_veg_error = self._high_vegetation_validation_error()
+        if high_veg_error is not None:
+            errors.append(high_veg_error)
+        low_veg_error = self._low_vegetation_validation_error()
+        if low_veg_error is not None:
+            errors.append(low_veg_error)
+        return errors
+
+    def export_configuration(self) -> None:
+        synthetic_module = self._resolve_synthetic_module()
+        if synthetic_module is None:
+            return
+
+        errors = self._collect_validation_errors()
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Export Error",
+                "Configuration cannot be exported because current settings are invalid:\n"
+                + "\n".join(errors),
+            )
+            return
+
+        default_name = f"synthetic_generation_seed_{int(self.seed_spin.value())}.yaml"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Generation Configuration",
+            default_name,
+            "YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not path:
+            return
+
+        out_path = Path(path)
+        if out_path.suffix.lower() not in {".yaml", ".yml"}:
+            out_path = out_path.with_suffix(".yaml")
+
+        try:
+            synthetic_module.save_generation_config(asdict(self.params()), out_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"Failed to save generation configuration:\n{exc}",
+            )
+            return
+
+    def import_configuration(self) -> None:
+        synthetic_module = self._resolve_synthetic_module()
+        if synthetic_module is None:
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Generation Configuration",
+            "",
+            "YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            config_data = synthetic_module.load_generation_config(path)
+            self._apply_params(SyntheticGenerationParams(**config_data))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Import Error",
+                f"Failed to load generation configuration:\n{exc}",
+            )
+            return
 
     @staticmethod
     def _normalize_class_names(class_names: Optional[Dict[int, str]]) -> Dict[int, str]:
@@ -1408,6 +1845,19 @@ class SyntheticGenerationDialog(QDialog):
         if yaw_value is not None:
             out["building_random_yaw"] = bool(yaw_value)
 
+        return out
+
+    @staticmethod
+    def _normalize_structure_type_names(
+        structure_type_names: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        source = structure_type_names if isinstance(structure_type_names, dict) else {}
+        for structure_type in FALLBACK_STRUCTURE_TYPES:
+            label = source.get(structure_type)
+            if label is None:
+                label = FALLBACK_STRUCTURE_TYPE_NAMES[structure_type]
+            out[structure_type] = str(label)
         return out
 
     @staticmethod
@@ -1524,6 +1974,12 @@ class SyntheticGenerationDialog(QDialog):
             for roof_type in self._building_roof_types
         )
 
+    def _current_structure_type_percentages(self) -> Tuple[float, ...]:
+        return tuple(
+            float(self.structure_type_percentage_spins[structure_type].value())
+            for structure_type in self._structure_types
+        )
+
     def _current_tree_crown_type_percentages(self) -> Tuple[float, ...]:
         return tuple(
             float(self.tree_crown_type_percentage_spins[crown_type].value())
@@ -1550,6 +2006,15 @@ class SyntheticGenerationDialog(QDialog):
             return True
 
         percentages = np.asarray(self._current_building_roof_type_percentages(), dtype=np.float64)
+        total = float(percentages.sum())
+        has_positive = bool(np.any(percentages > 0.0))
+        return has_positive and abs(total - 100.0) <= 0.01
+
+    def _is_structure_distribution_valid(self) -> bool:
+        if not self.custom_structure_type_check.isChecked():
+            return True
+
+        percentages = np.asarray(self._current_structure_type_percentages(), dtype=np.float64)
         total = float(percentages.sum())
         has_positive = bool(np.any(percentages > 0.0))
         return has_positive and abs(total - 100.0) <= 0.01
@@ -1616,6 +2081,14 @@ class SyntheticGenerationDialog(QDialog):
             self.building_validation_label.setStyleSheet("color: #b00020;")
 
         self._update_building_distribution_summary()
+        self._update_ok_button_state()
+
+    def _update_structure_settings_state(self) -> None:
+        self.structure_count_spin.setEnabled(bool(self.custom_structure_count_check.isChecked()))
+        is_custom_distribution = bool(self.custom_structure_type_check.isChecked())
+        for spin in self.structure_type_percentage_spins.values():
+            spin.setEnabled(is_custom_distribution)
+        self._update_structure_distribution_summary()
         self._update_ok_button_state()
 
     def _update_high_vegetation_state(self) -> None:
@@ -1713,6 +2186,28 @@ class SyntheticGenerationDialog(QDialog):
         self.building_roof_distribution_sum_label.setStyleSheet(f"color: {color};")
         self._update_ok_button_state()
 
+    def _update_structure_distribution_summary(self) -> None:
+        total = float(sum(self._current_structure_type_percentages()))
+        is_custom = bool(self.custom_structure_type_check.isChecked())
+        is_valid = self._is_structure_distribution_valid()
+
+        if not is_custom:
+            text = f"{total:.2f}% (custom disabled, random distribution will be used)"
+            color = "#666666"
+        elif is_valid:
+            text = f"{total:.2f}% (valid)"
+            color = "#1f7a1f"
+        elif total <= 0.0:
+            text = f"{total:.2f}% (invalid: at least one type must be > 0)"
+            color = "#b00020"
+        else:
+            text = f"{total:.2f}% (invalid: must equal 100.00%)"
+            color = "#b00020"
+
+        self.structure_distribution_sum_label.setText(text)
+        self.structure_distribution_sum_label.setStyleSheet(f"color: {color};")
+        self._update_ok_button_state()
+
     def _update_tree_crown_distribution_summary(self) -> None:
         total = float(sum(self._current_tree_crown_type_percentages()))
         is_custom = bool(self.custom_tree_crown_type_check.isChecked())
@@ -1763,6 +2258,7 @@ class SyntheticGenerationDialog(QDialog):
         self.ok_button.setEnabled(
             self._is_class_distribution_valid()
             and self._is_building_roof_distribution_valid()
+            and self._is_structure_distribution_valid()
             and self._is_tree_crown_distribution_valid()
             and self._is_vehicle_distribution_valid()
             and self._building_validation_error() is None
@@ -1771,33 +2267,7 @@ class SyntheticGenerationDialog(QDialog):
         )
 
     def accept(self) -> None:
-        errors: List[str] = []
-        if not self._is_class_distribution_valid():
-            errors.append(
-                "When custom class distribution is enabled, class percentages must sum to 100%."
-            )
-        if not self._is_building_roof_distribution_valid():
-            errors.append(
-                "When custom building roof type distribution is enabled, percentages must sum to 100%."
-            )
-        if not self._is_tree_crown_distribution_valid():
-            errors.append(
-                "When custom tree crown type distribution is enabled, percentages must sum to 100%."
-            )
-        if not self._is_vehicle_distribution_valid():
-            errors.append(
-                "When custom vehicle type distribution is enabled, vehicle type percentages must sum to 100%."
-            )
-        building_error = self._building_validation_error()
-        if building_error is not None:
-            errors.append(building_error)
-        high_veg_error = self._high_vegetation_validation_error()
-        if high_veg_error is not None:
-            errors.append(high_veg_error)
-        low_veg_error = self._low_vegetation_validation_error()
-        if low_veg_error is not None:
-            errors.append(low_veg_error)
-
+        errors = self._collect_validation_errors()
         if errors:
             QMessageBox.warning(
                 self,
@@ -1826,6 +2296,10 @@ class SyntheticGenerationDialog(QDialog):
             building_floor_min=int(self.building_floor_min_spin.value()),
             building_floor_max=int(self.building_floor_max_spin.value()),
             building_random_yaw=bool(self.building_random_yaw_check.isChecked()),
+            custom_structure_count=bool(self.custom_structure_count_check.isChecked()),
+            structure_count=int(self.structure_count_spin.value()),
+            custom_structure_type_distribution=bool(self.custom_structure_type_check.isChecked()),
+            structure_type_percentages=self._current_structure_type_percentages(),
             custom_tree_count=bool(self.custom_tree_count_check.isChecked()),
             tree_count=int(self.tree_count_spin.value()),
             custom_tree_crown_type_distribution=bool(self.custom_tree_crown_type_check.isChecked()),
@@ -2210,11 +2684,16 @@ class PointCloudGLWidget(QOpenGLWidget):
 
         buttons = event.buttons()
         if buttons & Qt.LeftButton:
-            self._yaw += dx * 0.35
-            self._pitch += dy * 0.35
-            self._pitch = max(-89.0, min(89.0, self._pitch))
-        elif buttons & (Qt.MidButton | Qt.RightButton):
+            if event.modifiers() & Qt.ShiftModifier:
+                self._apply_pan(dx, dy)
+            else:
+                self._yaw += dx * 0.35
+                self._pitch += dy * 0.35
+                self._pitch = max(-89.0, min(89.0, self._pitch))
+        elif buttons & Qt.MidButton:
             self._apply_pan(dx, dy)
+        elif buttons & Qt.RightButton:
+            self._apply_dolly_drag(dy)
 
         self._last_mouse_pos = current
         self.update()
@@ -2407,6 +2886,11 @@ class PointCloudGLWidget(QOpenGLWidget):
         h = max(1.0, float(self.height()))
         world_per_pixel = 2.0 * self._distance * np.tan(np.radians(self._fov_y_deg) * 0.5) / h
         self._pan += (-dx * world_per_pixel) * right + (dy * world_per_pixel) * up
+
+    def _apply_dolly_drag(self, dy: float) -> None:
+        # CloudCompare-like RMB drag zoom: up -> zoom in, down -> zoom out.
+        scale = pow(1.01, float(dy))
+        self._distance = max(1e-3, self._distance * float(scale))
 
     def _resolve_mode(self, mode: str) -> str:
         if self._cloud is None:
@@ -2756,6 +3240,23 @@ class MainWindow(QMainWindow):
                     for key in FALLBACK_BUILDING_ROOF_TYPES
                 )
         building_defaults = getattr(synthetic_module, "BUILDING_DEFAULTS", None)
+        structure_type_names = getattr(synthetic_module, "STRUCTURE_TYPE_NAMES", None)
+        default_structure_type_percentages = getattr(
+            synthetic_module,
+            "DEFAULT_STRUCTURE_TYPE_PERCENTAGES",
+            None,
+        )
+        if default_structure_type_percentages is None:
+            default_structure_type_ratios = getattr(
+                synthetic_module,
+                "DEFAULT_STRUCTURE_TYPE_RATIOS",
+                None,
+            )
+            if isinstance(default_structure_type_ratios, dict):
+                default_structure_type_percentages = tuple(
+                    float(default_structure_type_ratios.get(key, 0.0)) * 100.0
+                    for key in FALLBACK_STRUCTURE_TYPES
+                )
         tree_crown_type_names = getattr(synthetic_module, "TREE_CROWN_TYPE_NAMES", None)
         default_tree_crown_type_percentages = getattr(
             synthetic_module,
@@ -2803,6 +3304,10 @@ class MainWindow(QMainWindow):
             ),
             default_building_roof_type_percentages=default_building_roof_type_percentages,
             building_defaults=building_defaults if isinstance(building_defaults, dict) else None,
+            structure_type_names=(
+                structure_type_names if isinstance(structure_type_names, dict) else None
+            ),
+            default_structure_type_percentages=default_structure_type_percentages,
             tree_crown_type_names=(
                 tree_crown_type_names if isinstance(tree_crown_type_names, dict) else None
             ),
@@ -2811,6 +3316,7 @@ class MainWindow(QMainWindow):
             vehicle_type_names=vehicle_type_names if isinstance(vehicle_type_names, dict) else None,
             default_vehicle_type_percentages=default_vehicle_type_percentages,
             low_veg_defaults=low_veg_defaults if isinstance(low_veg_defaults, dict) else None,
+            synthetic_module=synthetic_module,
             parent=self,
         )
         if dialog.exec_() != QDialog.Accepted:
@@ -2844,6 +3350,16 @@ class MainWindow(QMainWindow):
                 building_floor_min=int(params.building_floor_min),
                 building_floor_max=int(params.building_floor_max),
                 building_random_yaw=bool(params.building_random_yaw),
+                structure_count=(
+                    params.structure_count
+                    if params.custom_structure_count
+                    else None
+                ),
+                structure_type_percentages=(
+                    params.structure_type_percentages
+                    if params.custom_structure_type_distribution
+                    else None
+                ),
                 tree_count=(
                     params.tree_count
                     if params.custom_tree_count

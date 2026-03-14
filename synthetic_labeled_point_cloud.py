@@ -19,10 +19,13 @@ Labels:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping, Sequence as SequenceABC
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+import sys
+from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
+import yaml
 
 
 CLASS_NAMES: Dict[int, str] = {
@@ -128,6 +131,83 @@ BUILDING_DEFAULTS: Dict[str, int | bool] = {
     "building_random_yaw": True,
 }
 
+STRUCTURE_TYPES: Tuple[str, ...] = (
+    "fence",
+    "railing",
+    "enclosure",
+    "guardrail",
+    "retaining_wall",
+    "parapet",
+    "stone_wall",
+    "pole_support",
+    "lamp",
+    "road_sign",
+    "traffic_light",
+    "bench",
+    "trash_bin",
+    "bike_rack",
+    "bollard",
+    "fountain",
+    "pedestal",
+    "monument",
+    "stairs",
+    "ramp",
+    "platform",
+    "footbridge",
+)
+STRUCTURE_TYPE_NAMES: Dict[str, str] = {
+    "fence": "Fence",
+    "railing": "Railing",
+    "enclosure": "Enclosure",
+    "guardrail": "Guardrail",
+    "retaining_wall": "Retaining wall",
+    "parapet": "Parapet",
+    "stone_wall": "Low stone wall",
+    "pole_support": "Pole / support",
+    "lamp": "Lamp",
+    "road_sign": "Road sign",
+    "traffic_light": "Traffic light",
+    "bench": "Bench",
+    "trash_bin": "Trash bin",
+    "bike_rack": "Bike rack",
+    "bollard": "Bollard",
+    "fountain": "Fountain",
+    "pedestal": "Pedestal",
+    "monument": "Small monument",
+    "stairs": "Stairs",
+    "ramp": "Ramp",
+    "platform": "Platform",
+    "footbridge": "Open footbridge",
+}
+DEFAULT_STRUCTURE_TYPE_RATIOS: Dict[str, float] = {
+    "fence": 0.12,
+    "railing": 0.07,
+    "enclosure": 0.06,
+    "guardrail": 0.06,
+    "retaining_wall": 0.06,
+    "parapet": 0.04,
+    "stone_wall": 0.05,
+    "pole_support": 0.07,
+    "lamp": 0.06,
+    "road_sign": 0.05,
+    "traffic_light": 0.03,
+    "bench": 0.05,
+    "trash_bin": 0.04,
+    "bike_rack": 0.03,
+    "bollard": 0.03,
+    "fountain": 0.02,
+    "pedestal": 0.02,
+    "monument": 0.02,
+    "stairs": 0.03,
+    "ramp": 0.02,
+    "platform": 0.03,
+    "footbridge": 0.04,
+}
+DEFAULT_STRUCTURE_TYPE_PERCENTAGES: Tuple[float, ...] = tuple(
+    DEFAULT_STRUCTURE_TYPE_RATIOS[structure_type] * 100.0
+    for structure_type in STRUCTURE_TYPES
+)
+
 TREE_CROWN_TYPES: Tuple[str, ...] = (
     "spherical",
     "pyramidal",
@@ -161,7 +241,632 @@ HIGH_VEG_DEFAULTS: Dict[str, float] = {
     "tree_min_crown_bottom_height": 1.3,
 }
 
+GENERATION_CONFIG_SCHEMA = "magicpoints.synthetic_generation/v1"
+
 Rect = Tuple[float, float, float, float]  # center_x, center_y, size_x, size_y
+
+
+def default_generation_config() -> Dict[str, Any]:
+    """Return normalized default generation settings used by the GUI and CLI config flow."""
+    return {
+        "total_points": 100_000,
+        "area_width": 240.0,
+        "area_length": 220.0,
+        "terrain_relief": 1.0,
+        "seed": 12,
+        "randomize_object_counts": True,
+        "custom_class_distribution": False,
+        "class_percentages": tuple(DEFAULT_CLASS_PERCENTAGES),
+        "custom_building_count": False,
+        "building_count": 14,
+        "custom_building_roof_type_distribution": False,
+        "building_roof_type_percentages": tuple(DEFAULT_BUILDING_ROOF_TYPE_PERCENTAGES),
+        "building_floor_min": int(BUILDING_DEFAULTS["building_floor_min"]),
+        "building_floor_max": int(BUILDING_DEFAULTS["building_floor_max"]),
+        "building_random_yaw": bool(BUILDING_DEFAULTS["building_random_yaw"]),
+        "custom_structure_count": False,
+        "structure_count": 10,
+        "custom_structure_type_distribution": False,
+        "structure_type_percentages": tuple(DEFAULT_STRUCTURE_TYPE_PERCENTAGES),
+        "custom_tree_count": False,
+        "tree_count": 70,
+        "custom_tree_crown_type_distribution": False,
+        "tree_crown_type_percentages": tuple(DEFAULT_TREE_CROWN_TYPE_PERCENTAGES),
+        "random_tree_crown_size": True,
+        "tree_max_crown_diameter": HIGH_VEG_DEFAULTS["tree_max_crown_diameter"],
+        "tree_max_crown_top_height": HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
+        "tree_min_crown_bottom_height": HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
+        "custom_vehicle_count": False,
+        "vehicle_count": 24,
+        "custom_vehicle_type_distribution": False,
+        "vehicle_type_percentages": tuple(DEFAULT_VEHICLE_TYPE_PERCENTAGES),
+        "custom_shrub_count": False,
+        "shrub_count": 24,
+        "random_shrub_size": True,
+        "shrub_max_diameter": LOW_VEG_DEFAULTS["shrub_max_diameter"],
+        "shrub_max_top_height": LOW_VEG_DEFAULTS["shrub_max_top_height"],
+        "shrub_min_bottom_height": LOW_VEG_DEFAULTS["shrub_min_bottom_height"],
+        "custom_grass_patch_count": False,
+        "grass_patch_count": 18,
+        "random_grass_patch_size": True,
+        "grass_patch_max_size_x": LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
+        "grass_patch_max_size_y": LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
+        "grass_max_height": LOW_VEG_DEFAULTS["grass_max_height"],
+    }
+
+
+def _coerce_bool(value: Any, name: str) -> bool:
+    """Coerce YAML scalar values into booleans with clear validation errors."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+        if int(value) in {0, 1}:
+            return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"`{name}` must be a boolean.")
+
+
+def _coerce_int(value: Any, name: str, *, min_value: int | None = None) -> int:
+    """Coerce YAML numeric values into integers and enforce optional lower bounds."""
+    parsed: int
+    if isinstance(value, bool):
+        raise ValueError(f"`{name}` must be an integer, got boolean.")
+    if isinstance(value, (int, np.integer)):
+        parsed = int(value)
+    elif isinstance(value, (float, np.floating)):
+        float_value = float(value)
+        if not np.isfinite(float_value) or not float_value.is_integer():
+            raise ValueError(f"`{name}` must be an integer, got {value}.")
+        parsed = int(float_value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(f"`{name}` must be an integer.")
+        try:
+            float_value = float(stripped)
+        except ValueError as exc:
+            raise ValueError(f"`{name}` must be an integer, got {value}.") from exc
+        if not np.isfinite(float_value) or not float_value.is_integer():
+            raise ValueError(f"`{name}` must be an integer, got {value}.")
+        parsed = int(float_value)
+    else:
+        raise ValueError(f"`{name}` must be an integer.")
+
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"`{name}` must be >= {min_value}, got {parsed}.")
+    return parsed
+
+
+def _coerce_float(
+    value: Any,
+    name: str,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    """Coerce YAML numeric values into finite floats and enforce optional bounds."""
+    if isinstance(value, bool):
+        raise ValueError(f"`{name}` must be a number, got boolean.")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"`{name}` must be a number.") from exc
+
+    if not np.isfinite(parsed):
+        raise ValueError(f"`{name}` must be finite, got {value}.")
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"`{name}` must be >= {min_value}, got {parsed}.")
+    if max_value is not None and parsed > max_value:
+        raise ValueError(f"`{name}` must be <= {max_value}, got {parsed}.")
+    return parsed
+
+
+def _parse_class_id_key(raw_key: Any, name: str) -> int:
+    try:
+        class_id = int(raw_key)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"`{name}` contains invalid class id key `{raw_key}`.") from exc
+    if class_id not in CLASS_IDS:
+        raise ValueError(
+            f"`{name}` contains unknown class id `{raw_key}`. Supported ids: {list(CLASS_IDS)}."
+        )
+    return class_id
+
+
+def _parse_choice_key(raw_key: Any, name: str, allowed_keys: Sequence[str]) -> str:
+    key = str(raw_key).strip().lower()
+    if key not in allowed_keys:
+        raise ValueError(
+            f"`{name}` contains unknown key `{raw_key}`. Supported keys: {list(allowed_keys)}."
+        )
+    return key
+
+
+def _coerce_percentage_values(
+    value: Any,
+    name: str,
+    *,
+    ordered_keys: Sequence[Any],
+    key_parser: Callable[[Any, str], Any],
+) -> Tuple[float, ...]:
+    if isinstance(value, Mapping):
+        parsed_values: Dict[Any, float] = {}
+        for raw_key, raw_value in value.items():
+            key = key_parser(raw_key, name)
+            parsed_values[key] = _coerce_float(
+                raw_value,
+                f"{name}[{raw_key!r}]",
+                min_value=0.0,
+                max_value=100.0,
+            )
+        return tuple(float(parsed_values.get(key, 0.0)) for key in ordered_keys)
+
+    if isinstance(value, SequenceABC) and not isinstance(value, (str, bytes, bytearray)):
+        values = [
+            _coerce_float(item, f"{name}[{index}]", min_value=0.0, max_value=100.0)
+            for index, item in enumerate(value)
+        ]
+        if len(values) != len(ordered_keys):
+            raise ValueError(
+                f"`{name}` must contain exactly {len(ordered_keys)} values, got {len(values)}."
+            )
+        return tuple(values)
+
+    raise ValueError(f"`{name}` must be a YAML sequence or mapping.")
+
+
+def _validate_enabled_percentage_distribution(
+    percentages: Sequence[float],
+    name: str,
+) -> None:
+    weights = np.asarray(percentages, dtype=np.float64)
+    total = float(weights.sum())
+    if not np.any(weights > 0.0):
+        raise ValueError(f"`{name}` must contain at least one value > 0.")
+    if abs(total - 100.0) > 0.01:
+        raise ValueError(f"`{name}` must sum to 100.0, got {total:.2f}.")
+
+
+def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Validate YAML-loaded generation settings and return normalized values.
+
+    Returned keys intentionally match the GUI `SyntheticGenerationParams` dataclass so the
+    configuration payload can be reused by both the standalone generator and the main app.
+    """
+    if not isinstance(config, Mapping):
+        raise ValueError("Generation configuration root must be a mapping.")
+
+    schema = config.get("schema")
+    if schema is not None and str(schema) != GENERATION_CONFIG_SCHEMA:
+        raise ValueError(
+            f"Unsupported config schema `{schema}`. Expected `{GENERATION_CONFIG_SCHEMA}`."
+        )
+
+    defaults = default_generation_config()
+    allowed_keys = set(defaults) | {"schema"}
+    unknown_keys = sorted(set(config) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"Unknown generation config fields: {unknown_keys}.")
+
+    normalized: Dict[str, Any] = {}
+    normalized["total_points"] = _coerce_int(
+        config.get("total_points", defaults["total_points"]),
+        "total_points",
+        min_value=1,
+    )
+    normalized["area_width"] = _coerce_float(
+        config.get("area_width", defaults["area_width"]),
+        "area_width",
+        min_value=1e-12,
+    )
+    normalized["area_length"] = _coerce_float(
+        config.get("area_length", defaults["area_length"]),
+        "area_length",
+        min_value=1e-12,
+    )
+    normalized["terrain_relief"] = _coerce_float(
+        config.get("terrain_relief", defaults["terrain_relief"]),
+        "terrain_relief",
+        min_value=0.0,
+        max_value=1.0,
+    )
+    normalized["seed"] = _coerce_int(config.get("seed", defaults["seed"]), "seed", min_value=0)
+    normalized["randomize_object_counts"] = _coerce_bool(
+        config.get("randomize_object_counts", defaults["randomize_object_counts"]),
+        "randomize_object_counts",
+    )
+
+    normalized["custom_class_distribution"] = _coerce_bool(
+        config.get("custom_class_distribution", defaults["custom_class_distribution"]),
+        "custom_class_distribution",
+    )
+    normalized["class_percentages"] = _coerce_percentage_values(
+        config.get("class_percentages", defaults["class_percentages"]),
+        "class_percentages",
+        ordered_keys=CLASS_IDS,
+        key_parser=_parse_class_id_key,
+    )
+
+    normalized["custom_building_count"] = _coerce_bool(
+        config.get("custom_building_count", defaults["custom_building_count"]),
+        "custom_building_count",
+    )
+    normalized["building_count"] = _coerce_int(
+        config.get("building_count", defaults["building_count"]),
+        "building_count",
+        min_value=1,
+    )
+    normalized["custom_building_roof_type_distribution"] = _coerce_bool(
+        config.get(
+            "custom_building_roof_type_distribution",
+            defaults["custom_building_roof_type_distribution"],
+        ),
+        "custom_building_roof_type_distribution",
+    )
+    normalized["building_roof_type_percentages"] = _coerce_percentage_values(
+        config.get(
+            "building_roof_type_percentages",
+            defaults["building_roof_type_percentages"],
+        ),
+        "building_roof_type_percentages",
+        ordered_keys=BUILDING_ROOF_TYPES,
+        key_parser=lambda raw_key, field_name: _parse_choice_key(
+            raw_key,
+            field_name,
+            BUILDING_ROOF_TYPES,
+        ),
+    )
+    normalized["building_floor_min"] = _coerce_int(
+        config.get("building_floor_min", defaults["building_floor_min"]),
+        "building_floor_min",
+        min_value=1,
+    )
+    normalized["building_floor_max"] = _coerce_int(
+        config.get("building_floor_max", defaults["building_floor_max"]),
+        "building_floor_max",
+        min_value=1,
+    )
+    normalized["building_random_yaw"] = _coerce_bool(
+        config.get("building_random_yaw", defaults["building_random_yaw"]),
+        "building_random_yaw",
+    )
+
+    normalized["custom_structure_count"] = _coerce_bool(
+        config.get("custom_structure_count", defaults["custom_structure_count"]),
+        "custom_structure_count",
+    )
+    normalized["structure_count"] = _coerce_int(
+        config.get("structure_count", defaults["structure_count"]),
+        "structure_count",
+        min_value=1,
+    )
+    normalized["custom_structure_type_distribution"] = _coerce_bool(
+        config.get(
+            "custom_structure_type_distribution",
+            defaults["custom_structure_type_distribution"],
+        ),
+        "custom_structure_type_distribution",
+    )
+    normalized["structure_type_percentages"] = _coerce_percentage_values(
+        config.get("structure_type_percentages", defaults["structure_type_percentages"]),
+        "structure_type_percentages",
+        ordered_keys=STRUCTURE_TYPES,
+        key_parser=lambda raw_key, field_name: _parse_choice_key(
+            raw_key,
+            field_name,
+            STRUCTURE_TYPES,
+        ),
+    )
+
+    normalized["custom_tree_count"] = _coerce_bool(
+        config.get("custom_tree_count", defaults["custom_tree_count"]),
+        "custom_tree_count",
+    )
+    normalized["tree_count"] = _coerce_int(
+        config.get("tree_count", defaults["tree_count"]),
+        "tree_count",
+        min_value=1,
+    )
+    normalized["custom_tree_crown_type_distribution"] = _coerce_bool(
+        config.get(
+            "custom_tree_crown_type_distribution",
+            defaults["custom_tree_crown_type_distribution"],
+        ),
+        "custom_tree_crown_type_distribution",
+    )
+    normalized["tree_crown_type_percentages"] = _coerce_percentage_values(
+        config.get("tree_crown_type_percentages", defaults["tree_crown_type_percentages"]),
+        "tree_crown_type_percentages",
+        ordered_keys=TREE_CROWN_TYPES,
+        key_parser=lambda raw_key, field_name: _parse_choice_key(
+            raw_key,
+            field_name,
+            TREE_CROWN_TYPES,
+        ),
+    )
+    normalized["random_tree_crown_size"] = _coerce_bool(
+        config.get("random_tree_crown_size", defaults["random_tree_crown_size"]),
+        "random_tree_crown_size",
+    )
+    normalized["tree_max_crown_diameter"] = _coerce_float(
+        config.get("tree_max_crown_diameter", defaults["tree_max_crown_diameter"]),
+        "tree_max_crown_diameter",
+        min_value=1e-12,
+    )
+    normalized["tree_max_crown_top_height"] = _coerce_float(
+        config.get("tree_max_crown_top_height", defaults["tree_max_crown_top_height"]),
+        "tree_max_crown_top_height",
+        min_value=1e-12,
+    )
+    normalized["tree_min_crown_bottom_height"] = _coerce_float(
+        config.get("tree_min_crown_bottom_height", defaults["tree_min_crown_bottom_height"]),
+        "tree_min_crown_bottom_height",
+        min_value=0.0,
+    )
+
+    normalized["custom_vehicle_count"] = _coerce_bool(
+        config.get("custom_vehicle_count", defaults["custom_vehicle_count"]),
+        "custom_vehicle_count",
+    )
+    normalized["vehicle_count"] = _coerce_int(
+        config.get("vehicle_count", defaults["vehicle_count"]),
+        "vehicle_count",
+        min_value=1,
+    )
+    normalized["custom_vehicle_type_distribution"] = _coerce_bool(
+        config.get(
+            "custom_vehicle_type_distribution",
+            defaults["custom_vehicle_type_distribution"],
+        ),
+        "custom_vehicle_type_distribution",
+    )
+    normalized["vehicle_type_percentages"] = _coerce_percentage_values(
+        config.get("vehicle_type_percentages", defaults["vehicle_type_percentages"]),
+        "vehicle_type_percentages",
+        ordered_keys=VEHICLE_TYPES,
+        key_parser=lambda raw_key, field_name: _parse_choice_key(
+            raw_key,
+            field_name,
+            VEHICLE_TYPES,
+        ),
+    )
+
+    normalized["custom_shrub_count"] = _coerce_bool(
+        config.get("custom_shrub_count", defaults["custom_shrub_count"]),
+        "custom_shrub_count",
+    )
+    normalized["shrub_count"] = _coerce_int(
+        config.get("shrub_count", defaults["shrub_count"]),
+        "shrub_count",
+        min_value=1,
+    )
+    normalized["random_shrub_size"] = _coerce_bool(
+        config.get("random_shrub_size", defaults["random_shrub_size"]),
+        "random_shrub_size",
+    )
+    normalized["shrub_max_diameter"] = _coerce_float(
+        config.get("shrub_max_diameter", defaults["shrub_max_diameter"]),
+        "shrub_max_diameter",
+        min_value=1e-12,
+    )
+    normalized["shrub_max_top_height"] = _coerce_float(
+        config.get("shrub_max_top_height", defaults["shrub_max_top_height"]),
+        "shrub_max_top_height",
+        min_value=1e-12,
+    )
+    normalized["shrub_min_bottom_height"] = _coerce_float(
+        config.get("shrub_min_bottom_height", defaults["shrub_min_bottom_height"]),
+        "shrub_min_bottom_height",
+        min_value=0.0,
+    )
+
+    normalized["custom_grass_patch_count"] = _coerce_bool(
+        config.get("custom_grass_patch_count", defaults["custom_grass_patch_count"]),
+        "custom_grass_patch_count",
+    )
+    normalized["grass_patch_count"] = _coerce_int(
+        config.get("grass_patch_count", defaults["grass_patch_count"]),
+        "grass_patch_count",
+        min_value=1,
+    )
+    normalized["random_grass_patch_size"] = _coerce_bool(
+        config.get("random_grass_patch_size", defaults["random_grass_patch_size"]),
+        "random_grass_patch_size",
+    )
+    normalized["grass_patch_max_size_x"] = _coerce_float(
+        config.get("grass_patch_max_size_x", defaults["grass_patch_max_size_x"]),
+        "grass_patch_max_size_x",
+        min_value=1e-12,
+    )
+    normalized["grass_patch_max_size_y"] = _coerce_float(
+        config.get("grass_patch_max_size_y", defaults["grass_patch_max_size_y"]),
+        "grass_patch_max_size_y",
+        min_value=1e-12,
+    )
+    normalized["grass_max_height"] = _coerce_float(
+        config.get("grass_max_height", defaults["grass_max_height"]),
+        "grass_max_height",
+        min_value=1e-12,
+    )
+
+    if normalized["custom_class_distribution"]:
+        _validate_enabled_percentage_distribution(
+            normalized["class_percentages"],
+            "class_percentages",
+        )
+    if normalized["custom_building_roof_type_distribution"]:
+        _validate_enabled_percentage_distribution(
+            normalized["building_roof_type_percentages"],
+            "building_roof_type_percentages",
+        )
+    if normalized["custom_structure_type_distribution"]:
+        _validate_enabled_percentage_distribution(
+            normalized["structure_type_percentages"],
+            "structure_type_percentages",
+        )
+    if normalized["custom_tree_crown_type_distribution"]:
+        _validate_enabled_percentage_distribution(
+            normalized["tree_crown_type_percentages"],
+            "tree_crown_type_percentages",
+        )
+    if normalized["custom_vehicle_type_distribution"]:
+        _validate_enabled_percentage_distribution(
+            normalized["vehicle_type_percentages"],
+            "vehicle_type_percentages",
+        )
+    if normalized["building_floor_max"] < normalized["building_floor_min"]:
+        raise ValueError("`building_floor_max` must be >= `building_floor_min`.")
+    if normalized["tree_min_crown_bottom_height"] >= normalized["tree_max_crown_top_height"]:
+        raise ValueError(
+            "`tree_min_crown_bottom_height` must be strictly less than "
+            "`tree_max_crown_top_height`."
+        )
+    if normalized["shrub_min_bottom_height"] >= normalized["shrub_max_top_height"]:
+        raise ValueError(
+            "`shrub_min_bottom_height` must be strictly less than `shrub_max_top_height`."
+        )
+
+    return normalized
+
+
+def generation_config_to_yaml_data(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Convert normalized generation settings into a readable YAML payload."""
+    validated = validate_generation_config(config)
+    yaml_data: Dict[str, Any] = {"schema": GENERATION_CONFIG_SCHEMA}
+    for key, value in validated.items():
+        if key == "class_percentages":
+            yaml_data[key] = {
+                str(class_id): float(value[index])
+                for index, class_id in enumerate(CLASS_IDS)
+            }
+        elif key == "building_roof_type_percentages":
+            yaml_data[key] = {
+                roof_type: float(value[index])
+                for index, roof_type in enumerate(BUILDING_ROOF_TYPES)
+            }
+        elif key == "structure_type_percentages":
+            yaml_data[key] = {
+                structure_type: float(value[index])
+                for index, structure_type in enumerate(STRUCTURE_TYPES)
+            }
+        elif key == "tree_crown_type_percentages":
+            yaml_data[key] = {
+                crown_type: float(value[index])
+                for index, crown_type in enumerate(TREE_CROWN_TYPES)
+            }
+        elif key == "vehicle_type_percentages":
+            yaml_data[key] = {
+                vehicle_type: float(value[index])
+                for index, vehicle_type in enumerate(VEHICLE_TYPES)
+            }
+        else:
+            yaml_data[key] = value
+    return yaml_data
+
+
+def save_generation_config(config: Mapping[str, Any], path: str | Path) -> Path:
+    """Validate and save generation settings to a YAML configuration file."""
+    output_path = Path(path)
+    yaml_data = generation_config_to_yaml_data(config)
+    with output_path.open("w", encoding="utf-8") as stream:
+        yaml.safe_dump(
+            yaml_data,
+            stream,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+    return output_path
+
+
+def load_generation_config(path: str | Path) -> Dict[str, Any]:
+    """Load and validate generation settings from a YAML configuration file."""
+    input_path = Path(path)
+    try:
+        with input_path.open("r", encoding="utf-8") as stream:
+            raw_config = yaml.safe_load(stream)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Failed to parse YAML configuration: {exc}") from exc
+
+    if raw_config is None:
+        raise ValueError("Configuration file is empty.")
+    if not isinstance(raw_config, Mapping):
+        raise ValueError("Configuration file root must be a mapping.")
+    return validate_generation_config(raw_config)
+
+
+def generation_config_to_pipeline_kwargs(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Translate validated config data into kwargs accepted by the generator pipeline."""
+    validated = validate_generation_config(config)
+    return {
+        "total_points": int(validated["total_points"]),
+        "area_width": float(validated["area_width"]),
+        "area_length": float(validated["area_length"]),
+        "terrain_relief": float(validated["terrain_relief"]),
+        "randomize_object_counts": bool(validated["randomize_object_counts"]),
+        "seed": int(validated["seed"]),
+        "class_percentages": (
+            validated["class_percentages"]
+            if validated["custom_class_distribution"]
+            else None
+        ),
+        "tree_count": int(validated["tree_count"]) if validated["custom_tree_count"] else None,
+        "tree_crown_type_percentages": (
+            validated["tree_crown_type_percentages"]
+            if validated["custom_tree_crown_type_distribution"]
+            else None
+        ),
+        "random_tree_crown_size": bool(validated["random_tree_crown_size"]),
+        "tree_max_crown_diameter": float(validated["tree_max_crown_diameter"]),
+        "tree_max_crown_top_height": float(validated["tree_max_crown_top_height"]),
+        "tree_min_crown_bottom_height": float(validated["tree_min_crown_bottom_height"]),
+        "building_count": (
+            int(validated["building_count"]) if validated["custom_building_count"] else None
+        ),
+        "building_roof_type_percentages": (
+            validated["building_roof_type_percentages"]
+            if validated["custom_building_roof_type_distribution"]
+            else None
+        ),
+        "building_floor_min": int(validated["building_floor_min"]),
+        "building_floor_max": int(validated["building_floor_max"]),
+        "building_random_yaw": bool(validated["building_random_yaw"]),
+        "structure_count": (
+            int(validated["structure_count"]) if validated["custom_structure_count"] else None
+        ),
+        "structure_type_percentages": (
+            validated["structure_type_percentages"]
+            if validated["custom_structure_type_distribution"]
+            else None
+        ),
+        "vehicle_count": (
+            int(validated["vehicle_count"]) if validated["custom_vehicle_count"] else None
+        ),
+        "vehicle_type_percentages": (
+            validated["vehicle_type_percentages"]
+            if validated["custom_vehicle_type_distribution"]
+            else None
+        ),
+        "shrub_count": int(validated["shrub_count"]) if validated["custom_shrub_count"] else None,
+        "random_shrub_size": bool(validated["random_shrub_size"]),
+        "shrub_max_diameter": float(validated["shrub_max_diameter"]),
+        "shrub_max_top_height": float(validated["shrub_max_top_height"]),
+        "shrub_min_bottom_height": float(validated["shrub_min_bottom_height"]),
+        "grass_patch_count": (
+            int(validated["grass_patch_count"])
+            if validated["custom_grass_patch_count"]
+            else None
+        ),
+        "random_grass_patch_size": bool(validated["random_grass_patch_size"]),
+        "grass_patch_max_size_x": float(validated["grass_patch_max_size_x"]),
+        "grass_patch_max_size_y": float(validated["grass_patch_max_size_y"]),
+        "grass_max_height": float(validated["grass_max_height"]),
+    }
 
 
 def _validate_positive(value: float, name: str) -> None:
@@ -257,6 +962,54 @@ def _vehicle_type_ratios_from_percentages(
     return {
         vehicle_type: float(weights[idx])
         for idx, vehicle_type in enumerate(VEHICLE_TYPES)
+    }
+
+
+def _structure_type_ratios_from_percentages(
+    structure_type_percentages: Sequence[float] | Dict[str, float] | None,
+) -> Dict[str, float]:
+    """
+    Build normalized structure type ratios from optional percentages.
+    Supports sequence in STRUCTURE_TYPES order or mapping by structure type keys.
+    """
+    if structure_type_percentages is None:
+        return dict(DEFAULT_STRUCTURE_TYPE_RATIOS)
+
+    if isinstance(structure_type_percentages, dict):
+        normalized: Dict[str, float] = {}
+        for key, value in structure_type_percentages.items():
+            structure_type = str(key).strip().lower()
+            if structure_type not in STRUCTURE_TYPES:
+                raise ValueError(
+                    f"Unknown structure type key `{key}` in `structure_type_percentages`. "
+                    f"Supported keys are {list(STRUCTURE_TYPES)}."
+                )
+            normalized[structure_type] = float(value)
+        values = [
+            float(normalized.get(structure_type, 0.0))
+            for structure_type in STRUCTURE_TYPES
+        ]
+    else:
+        values = [float(value) for value in structure_type_percentages]
+        if len(values) != len(STRUCTURE_TYPES):
+            raise ValueError(
+                "`structure_type_percentages` must contain exactly "
+                f"{len(STRUCTURE_TYPES)} values "
+                f"(for structure types {list(STRUCTURE_TYPES)}), got {len(values)}."
+            )
+
+    weights = np.array(values, dtype=np.float64)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError("`structure_type_percentages` must contain only finite numbers.")
+    if np.any(weights < 0.0):
+        raise ValueError("`structure_type_percentages` must be non-negative.")
+    if np.isclose(weights.sum(), 0.0):
+        raise ValueError("At least one structure type percentage must be > 0.")
+
+    weights = weights / weights.sum()
+    return {
+        structure_type: float(weights[idx])
+        for idx, structure_type in enumerate(STRUCTURE_TYPES)
     }
 
 
@@ -1366,6 +2119,1093 @@ def _generate_bridge_points(
     return np.column_stack((x, y, z, labels))
 
 
+def _assemble_structure_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    x_center: float,
+    y_center: float,
+    yaw: float,
+    x_local: np.ndarray,
+    y_local: np.ndarray,
+    z_local: np.ndarray,
+    xy_noise: float = 0.01,
+    z_noise: float = 0.01,
+) -> np.ndarray:
+    """Transform local structure coordinates into world space and assign class-5 labels."""
+    if x_local.size == 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    x_rot, y_rot = _rotate_xy(x_local, y_local, yaw=yaw)
+    x = float(x_center) + x_rot
+    y = float(y_center) + y_rot
+    if xy_noise > 0.0:
+        x = x + rng.normal(0.0, float(xy_noise), size=x.shape[0])
+        y = y + rng.normal(0.0, float(xy_noise), size=y.shape[0])
+    base = terrain_fn(x, y)
+    z = base + np.asarray(z_local, dtype=np.float64)
+    if z_noise > 0.0:
+        z = z + rng.normal(0.0, float(z_noise), size=z.shape[0])
+    z = np.maximum(z, base + 0.01)
+    labels = np.full(x.shape[0], 5, dtype=np.int32)
+    return np.column_stack((x, y, z, labels))
+
+
+def _sample_vertical_cylinder_local(
+    rng: np.random.Generator,
+    n_points: int,
+    radius: float,
+    height: float,
+    *,
+    x_center: float = 0.0,
+    y_center: float = 0.0,
+    z_base: float = 0.0,
+    top_share: float = 0.18,
+    bottom_share: float = 0.0,
+) -> np.ndarray:
+    """Sample points on a vertical cylinder with optional top/bottom caps."""
+    if n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    radius = max(0.03, float(radius))
+    height = max(0.05, float(height))
+    top_share = float(np.clip(top_share, 0.0, 0.9))
+    bottom_share = float(np.clip(bottom_share, 0.0, 0.9))
+    side_share = max(0.0, 1.0 - top_share - bottom_share)
+    weights = np.array([side_share, top_share, bottom_share], dtype=np.float64)
+    if np.isclose(weights.sum(), 0.0):
+        weights[0] = 1.0
+    weights /= weights.sum()
+
+    component = rng.choice([0, 1, 2], size=int(n_points), p=weights)
+    local = np.empty((int(n_points), 3), dtype=np.float64)
+
+    side = component == 0
+    if np.any(side):
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=int(np.sum(side)))
+        local[side] = np.column_stack(
+            (
+                x_center + radius * np.cos(theta),
+                y_center + radius * np.sin(theta),
+                z_base + rng.uniform(0.0, height, size=theta.size),
+            )
+        )
+
+    top = component == 1
+    if np.any(top):
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=int(np.sum(top)))
+        radial = radius * np.sqrt(rng.uniform(0.0, 1.0, size=theta.size))
+        local[top] = np.column_stack(
+            (
+                x_center + radial * np.cos(theta),
+                y_center + radial * np.sin(theta),
+                np.full(theta.size, z_base + height),
+            )
+        )
+
+    bottom = component == 2
+    if np.any(bottom):
+        theta = rng.uniform(0.0, 2.0 * np.pi, size=int(np.sum(bottom)))
+        radial = radius * np.sqrt(rng.uniform(0.0, 1.0, size=theta.size))
+        local[bottom] = np.column_stack(
+            (
+                x_center + radial * np.cos(theta),
+                y_center + radial * np.sin(theta),
+                np.full(theta.size, z_base),
+            )
+        )
+    return local
+
+
+def _sample_disk_plane_local(
+    rng: np.random.Generator,
+    n_points: int,
+    radius_x: float,
+    radius_y: float,
+    *,
+    z_value: float,
+    x_center: float = 0.0,
+    y_center: float = 0.0,
+) -> np.ndarray:
+    """Sample points on a horizontal ellipse/disc plane in local coordinates."""
+    if n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+    theta = rng.uniform(0.0, 2.0 * np.pi, size=int(n_points))
+    radial = np.sqrt(rng.uniform(0.0, 1.0, size=int(n_points)))
+    x = x_center + float(radius_x) * radial * np.cos(theta)
+    y = y_center + float(radius_y) * radial * np.sin(theta)
+    z = np.full(int(n_points), float(z_value), dtype=np.float64)
+    return np.column_stack((x, y, z))
+
+
+def _generate_linear_barrier_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    length: float,
+    height: float,
+    yaw: float,
+    width: float = 0.12,
+    rail_levels: Sequence[float] = (),
+    post_spacing: float = 2.6,
+    solid: bool = False,
+    xy_noise: float = 0.012,
+    z_noise: float = 0.012,
+) -> np.ndarray:
+    """Generate a generic barrier-like structure: fence, railing, wall, parapet, etc."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    length = max(1.0, float(length))
+    width = max(0.04, float(width))
+    height = max(0.15, float(height))
+    n_total = int(n_points)
+
+    if solid:
+        body_n = max(1, int(n_total * 0.78))
+        post_n = max(0, n_total - body_n)
+        rail_n = 0
+    else:
+        rail_n = max(1, int(n_total * 0.44)) if len(rail_levels) > 0 else 0
+        post_n = max(1, int(n_total * 0.28))
+        body_n = max(0, n_total - rail_n - post_n)
+
+    parts: List[np.ndarray] = []
+
+    if rail_n > 0 and len(rail_levels) > 0:
+        t = rng.uniform(-0.5, 0.5, size=rail_n) * length
+        lateral = rng.normal(0.0, 0.12 * width, size=rail_n)
+        levels = np.asarray(rail_levels, dtype=np.float64)
+        z = levels[rng.integers(0, len(levels), size=rail_n)] + rng.normal(0.0, 0.02, size=rail_n)
+        parts.append(np.column_stack((t, lateral, z)))
+
+    if post_n > 0:
+        n_posts = max(2, int(np.ceil(length / max(0.8, float(post_spacing)))) + 1)
+        anchors = np.linspace(-0.5 * length, 0.5 * length, n_posts)
+        x_post = rng.choice(anchors, size=post_n) + rng.normal(0.0, 0.04, size=post_n)
+        y_post = rng.normal(0.0, 0.18 * width, size=post_n)
+        z_post = rng.uniform(0.0, height, size=post_n)
+        parts.append(np.column_stack((x_post, y_post, z_post)))
+
+    if body_n > 0:
+        if solid:
+            face = rng.choice([0, 1, 2, 3], size=body_n, p=[0.34, 0.25, 0.25, 0.16])
+            u = rng.uniform(-0.5, 0.5, size=body_n)
+            v = rng.uniform(0.0, 1.0, size=body_n)
+            x_body = np.empty(body_n, dtype=np.float64)
+            y_body = np.empty(body_n, dtype=np.float64)
+            z_body = np.empty(body_n, dtype=np.float64)
+
+            top = face == 0
+            x_body[top] = u[top] * length
+            y_body[top] = rng.uniform(-0.5, 0.5, size=int(np.sum(top))) * width
+            z_body[top] = np.full(int(np.sum(top)), height)
+
+            left = face == 1
+            x_body[left] = u[left] * length
+            y_body[left] = np.full(int(np.sum(left)), -0.5 * width)
+            z_body[left] = v[left] * height
+
+            right = face == 2
+            x_body[right] = u[right] * length
+            y_body[right] = np.full(int(np.sum(right)), 0.5 * width)
+            z_body[right] = v[right] * height
+
+            cap = face == 3
+            x_body[cap] = rng.choice([-0.5 * length, 0.5 * length], size=int(np.sum(cap)))
+            y_body[cap] = rng.uniform(-0.5, 0.5, size=int(np.sum(cap))) * width
+            z_body[cap] = v[cap] * height
+            parts.append(np.column_stack((x_body, y_body, z_body)))
+        else:
+            x_body = rng.uniform(-0.5, 0.5, size=body_n) * length
+            y_body = rng.normal(0.0, 0.10 * width, size=body_n)
+            z_body = rng.uniform(0.08 * height, 0.96 * height, size=body_n)
+            parts.append(np.column_stack((x_body, y_body, z_body)))
+
+    local = np.vstack(parts) if parts else np.empty((0, 3), dtype=np.float64)
+    return _assemble_structure_points(
+        rng=rng,
+        terrain_fn=terrain_fn,
+        x_center=x_center,
+        y_center=y_center,
+        yaw=yaw,
+        x_local=local[:, 0],
+        y_local=local[:, 1],
+        z_local=local[:, 2],
+        xy_noise=xy_noise,
+        z_noise=z_noise,
+    )
+
+
+def _generate_rectangular_enclosure_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    size_x: float,
+    size_y: float,
+    height: float,
+    yaw: float,
+) -> np.ndarray:
+    """Generate a rectangular enclosure / perimeter barrier."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    size_x = max(2.0, float(size_x))
+    size_y = max(2.0, float(size_y))
+    counts = _split_count_by_weights(int(n_points), [size_x, size_y, size_x, size_y])
+    side_defs = (
+        (0.0, 0.5 * size_y, size_x, yaw),
+        (0.5 * size_x, 0.0, size_y, yaw + 0.5 * np.pi),
+        (0.0, -0.5 * size_y, size_x, yaw),
+        (-0.5 * size_x, 0.0, size_y, yaw + 0.5 * np.pi),
+    )
+
+    parts: List[np.ndarray] = []
+    for count, (local_cx, local_cy, side_length, side_yaw) in zip(counts, side_defs):
+        if int(count) <= 0:
+            continue
+        side_offset_x, side_offset_y = _rotate_xy(
+            np.array([local_cx], dtype=np.float64),
+            np.array([local_cy], dtype=np.float64),
+            yaw=yaw,
+        )
+        parts.append(
+            _generate_linear_barrier_points(
+                rng=rng,
+                terrain_fn=terrain_fn,
+                n_points=int(count),
+                x_center=float(x_center + side_offset_x[0]),
+                y_center=float(y_center + side_offset_y[0]),
+                length=float(side_length),
+                height=float(height),
+                yaw=float(side_yaw),
+                width=0.10,
+                rail_levels=(0.58 * height, 0.98 * height),
+                post_spacing=float(rng.uniform(1.7, 2.8)),
+                solid=False,
+                xy_noise=0.010,
+                z_noise=0.010,
+            )
+        )
+    return np.vstack(parts) if parts else np.empty((0, 4), dtype=np.float64)
+
+
+def _generate_lamp_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    height: float,
+    yaw: float,
+) -> np.ndarray:
+    """Generate lamp post with pole, arm, and luminaire head."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    n_pole = max(1, int(n_points * 0.55))
+    n_arm = max(1, int(n_points * 0.18))
+    n_head = max(0, int(n_points) - n_pole - n_arm)
+    arm_len = float(rng.uniform(0.55, 1.35))
+
+    pole = _sample_vertical_cylinder_local(
+        rng,
+        n_pole,
+        radius=float(rng.uniform(0.05, 0.11)),
+        height=float(height),
+        top_share=0.05,
+    )
+    arm = np.column_stack(
+        (
+            rng.uniform(0.0, arm_len, size=n_arm),
+            rng.normal(0.0, 0.03, size=n_arm),
+            np.full(n_arm, 0.82 * height) + rng.normal(0.0, 0.02, size=n_arm),
+        )
+    )
+    head = _sample_cuboid_surface_local(
+        rng,
+        n_head,
+        length=float(rng.uniform(0.25, 0.55)),
+        width=float(rng.uniform(0.16, 0.32)),
+        height=float(rng.uniform(0.12, 0.20)),
+        x_center=arm_len,
+        y_center=0.0,
+        z_base=0.72 * height,
+    )
+    local = np.vstack([pole, arm, head]) if n_head > 0 else np.vstack([pole, arm])
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_road_sign_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    height: float,
+    yaw: float,
+) -> np.ndarray:
+    """Generate road sign with vertical pole and sign board."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    n_pole = max(1, int(n_points * 0.42))
+    n_board = max(0, int(n_points) - n_pole)
+    pole = _sample_vertical_cylinder_local(
+        rng,
+        n_pole,
+        radius=float(rng.uniform(0.04, 0.08)),
+        height=float(height),
+        top_share=0.04,
+    )
+    board_width = float(rng.uniform(0.45, 1.10))
+    board_height = float(rng.uniform(0.40, 0.95))
+    board = _sample_cuboid_surface_local(
+        rng,
+        n_board,
+        length=float(rng.uniform(0.05, 0.10)),
+        width=board_width,
+        height=board_height,
+        x_center=float(rng.uniform(-0.02, 0.08)),
+        y_center=0.0,
+        z_base=float(rng.uniform(0.45, 0.65) * height),
+    )
+    local = np.vstack([pole, board]) if n_board > 0 else pole
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_traffic_light_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    height: float,
+    yaw: float,
+) -> np.ndarray:
+    """Generate traffic light with pole, horizontal boom, and light heads."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    n_pole = max(1, int(n_points * 0.40))
+    n_arm = max(1, int(n_points * 0.18))
+    n_heads_total = max(0, int(n_points) - n_pole - n_arm)
+    pole = _sample_vertical_cylinder_local(
+        rng,
+        n_pole,
+        radius=float(rng.uniform(0.06, 0.10)),
+        height=float(height),
+        top_share=0.04,
+    )
+    boom_len = float(rng.uniform(1.6, 3.4))
+    arm = np.column_stack(
+        (
+            rng.uniform(0.0, boom_len, size=n_arm),
+            rng.normal(0.0, 0.04, size=n_arm),
+            np.full(n_arm, 0.82 * height) + rng.normal(0.0, 0.02, size=n_arm),
+        )
+    )
+    head_count = min(3, max(1, n_heads_total))
+    head_alloc = _split_count_evenly(n_heads_total, head_count)
+    head_parts: List[np.ndarray] = []
+    for idx, head_n in enumerate(head_alloc):
+        if int(head_n) <= 0:
+            continue
+        head_parts.append(
+            _sample_cuboid_surface_local(
+                rng,
+                int(head_n),
+                length=0.18,
+                width=0.26,
+                height=0.52,
+                x_center=boom_len - 0.22 * idx,
+                y_center=0.0,
+                z_base=0.56 * height - 0.10 * idx,
+            )
+        )
+    local_parts = [pole, arm]
+    if head_parts:
+        local_parts.append(np.vstack(head_parts))
+    local = np.vstack(local_parts)
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_bench_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate bench with seat, backrest, and legs."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    length = float(rng.uniform(1.3, 2.2))
+    seat_depth = float(rng.uniform(0.34, 0.48))
+    n_seat = max(1, int(n_points * 0.38))
+    n_back = max(1, int(n_points * 0.24))
+    n_legs = max(0, int(n_points) - n_seat - n_back)
+    seat = _sample_cuboid_surface_local(
+        rng,
+        n_seat,
+        length=length,
+        width=seat_depth,
+        height=0.08,
+        x_center=0.0,
+        y_center=0.02,
+        z_base=0.42,
+    )
+    back = _sample_cuboid_surface_local(
+        rng,
+        n_back,
+        length=length,
+        width=0.08,
+        height=0.42,
+        x_center=0.0,
+        y_center=-0.5 * seat_depth + 0.02,
+        z_base=0.42,
+    )
+    leg_parts: List[np.ndarray] = []
+    if n_legs > 0:
+        leg_positions = [
+            (-0.34 * length, -0.10),
+            (-0.34 * length, 0.10),
+            (0.34 * length, -0.10),
+            (0.34 * length, 0.10),
+        ]
+        leg_alloc = _split_count_evenly(n_legs, len(leg_positions))
+        for (leg_x, leg_y), leg_n in zip(leg_positions, leg_alloc):
+            if int(leg_n) <= 0:
+                continue
+            leg_parts.append(
+                _sample_cuboid_surface_local(
+                    rng,
+                    int(leg_n),
+                    length=0.07,
+                    width=0.07,
+                    height=0.42,
+                    x_center=leg_x,
+                    y_center=leg_y,
+                    z_base=0.0,
+                )
+            )
+    local_parts = [seat, back]
+    if leg_parts:
+        local_parts.append(np.vstack(leg_parts))
+    local = np.vstack(local_parts)
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_trash_bin_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate urban trash bin."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    local = _sample_vertical_cylinder_local(
+        rng,
+        int(n_points),
+        radius=float(rng.uniform(0.16, 0.28)),
+        height=float(rng.uniform(0.75, 1.15)),
+        top_share=0.24,
+        bottom_share=0.08,
+    )
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_bike_rack_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate bike rack as a set of repeated U-shaped hoops."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+
+    loop_count = int(rng.integers(2, 5))
+    loop_spacing = float(rng.uniform(0.55, 0.85))
+    loop_span = float(rng.uniform(0.45, 0.72))
+    loop_height = float(rng.uniform(0.72, 1.05))
+    loop_alloc = _split_count_evenly(int(n_points), loop_count)
+    loop_centers = np.linspace(
+        -0.5 * loop_spacing * max(0, loop_count - 1),
+        0.5 * loop_spacing * max(0, loop_count - 1),
+        loop_count,
+    )
+
+    local_parts: List[np.ndarray] = []
+    for loop_x, loop_n in zip(loop_centers, loop_alloc):
+        if int(loop_n) <= 0:
+            continue
+        n_side = max(1, int(loop_n * 0.60))
+        n_arc = max(0, int(loop_n) - n_side)
+        side_left = n_side // 2
+        side_right = n_side - side_left
+
+        left = np.column_stack(
+            (
+                np.full(side_left, loop_x) + rng.normal(0.0, 0.015, size=side_left),
+                np.full(side_left, -0.5 * loop_span) + rng.normal(0.0, 0.015, size=side_left),
+                rng.uniform(0.0, loop_height, size=side_left),
+            )
+        )
+        right = np.column_stack(
+            (
+                np.full(side_right, loop_x) + rng.normal(0.0, 0.015, size=side_right),
+                np.full(side_right, 0.5 * loop_span) + rng.normal(0.0, 0.015, size=side_right),
+                rng.uniform(0.0, loop_height, size=side_right),
+            )
+        )
+        if n_arc > 0:
+            theta = rng.uniform(0.0, np.pi, size=n_arc)
+            arc = np.column_stack(
+                (
+                    np.full(n_arc, loop_x) + rng.normal(0.0, 0.015, size=n_arc),
+                    0.5 * loop_span * np.cos(theta),
+                    loop_height + 0.22 * loop_span * np.sin(theta),
+                )
+            )
+            local_parts.append(np.vstack([left, right, arc]))
+        else:
+            local_parts.append(np.vstack([left, right]))
+    local = np.vstack(local_parts) if local_parts else np.empty((0, 3), dtype=np.float64)
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_bollard_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate short cylindrical bollard."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    local = _sample_vertical_cylinder_local(
+        rng,
+        int(n_points),
+        radius=float(rng.uniform(0.08, 0.16)),
+        height=float(rng.uniform(0.75, 1.15)),
+        top_share=0.24,
+    )
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_fountain_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate simple circular fountain with basin and central jet/pedestal."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    basin_radius = float(rng.uniform(1.1, 2.8))
+    wall_height = float(rng.uniform(0.25, 0.55))
+    n_wall = max(1, int(n_points * 0.42))
+    n_water = max(1, int(n_points * 0.24))
+    n_center = max(0, int(n_points) - n_wall - n_water)
+
+    wall = _sample_vertical_cylinder_local(
+        rng,
+        n_wall,
+        radius=basin_radius,
+        height=wall_height,
+        top_share=0.22,
+    )
+    water = _sample_disk_plane_local(
+        rng,
+        n_water,
+        radius_x=0.82 * basin_radius,
+        radius_y=0.82 * basin_radius,
+        z_value=0.12,
+    )
+    center_height = float(rng.uniform(0.7, 1.8))
+    center = _sample_vertical_cylinder_local(
+        rng,
+        n_center,
+        radius=float(rng.uniform(0.10, 0.26)),
+        height=center_height,
+        z_base=0.0,
+        top_share=0.18,
+    )
+    local = np.vstack([wall, water, center]) if n_center > 0 else np.vstack([wall, water])
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_pedestal_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate pedestal / plinth."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    local = _sample_cuboid_surface_local(
+        rng,
+        int(n_points),
+        length=float(rng.uniform(0.8, 1.8)),
+        width=float(rng.uniform(0.8, 1.8)),
+        height=float(rng.uniform(0.8, 1.8)),
+        z_base=0.0,
+    )
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_monument_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate small monument: pedestal plus top mass."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    n_base = max(1, int(n_points * 0.42))
+    n_top = max(0, int(n_points) - n_base)
+    base_height = float(rng.uniform(0.55, 1.20))
+    base = _sample_cuboid_surface_local(
+        rng,
+        n_base,
+        length=float(rng.uniform(1.0, 2.1)),
+        width=float(rng.uniform(1.0, 2.1)),
+        height=base_height,
+        z_base=0.0,
+    )
+    top = _sample_cuboid_surface_local(
+        rng,
+        n_top,
+        length=float(rng.uniform(0.35, 0.80)),
+        width=float(rng.uniform(0.35, 0.80)),
+        height=float(rng.uniform(0.9, 2.4)),
+        x_center=0.0,
+        y_center=0.0,
+        z_base=base_height,
+    )
+    local = np.vstack([base, top]) if n_top > 0 else base
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_stairs_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate small outdoor stairs with step treads and risers."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    step_count = int(rng.integers(4, 9))
+    tread_depth = float(rng.uniform(0.26, 0.38))
+    step_height = float(rng.uniform(0.14, 0.19))
+    width = float(rng.uniform(1.4, 3.4))
+    total_length = step_count * tread_depth
+
+    component = rng.choice([0, 1], size=int(n_points), p=[0.64, 0.36])
+    local = np.empty((int(n_points), 3), dtype=np.float64)
+
+    top = component == 0
+    if np.any(top):
+        steps = rng.integers(0, step_count, size=int(np.sum(top)))
+        x = -0.5 * total_length + (steps + rng.uniform(0.05, 0.95, size=steps.size)) * tread_depth
+        y = rng.uniform(-0.5, 0.5, size=steps.size) * width
+        z = (steps + 1) * step_height
+        local[top] = np.column_stack((x, y, z))
+
+    riser = component == 1
+    if np.any(riser):
+        steps = rng.integers(0, step_count, size=int(np.sum(riser)))
+        x = -0.5 * total_length + (steps + 1.0) * tread_depth
+        y = rng.uniform(-0.5, 0.5, size=steps.size) * width
+        z = steps * step_height + rng.uniform(0.0, step_height, size=steps.size)
+        local[riser] = np.column_stack((x, y, z))
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_ramp_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate outdoor ramp with sloped plane and optional side rails."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    length = float(rng.uniform(3.0, 8.0))
+    width = float(rng.uniform(1.4, 3.2))
+    rise = float(rng.uniform(0.35, 1.25))
+    n_plane = max(1, int(n_points * 0.72))
+    n_rails = max(0, int(n_points) - n_plane)
+
+    x_plane = rng.uniform(-0.5, 0.5, size=n_plane) * length
+    y_plane = rng.uniform(-0.5, 0.5, size=n_plane) * width
+    alpha = (x_plane + 0.5 * length) / length
+    z_plane = alpha * rise
+
+    parts = [np.column_stack((x_plane, y_plane, z_plane))]
+    if n_rails > 0:
+        side = rng.choice([-1.0, 1.0], size=n_rails)
+        x_rail = rng.uniform(-0.5, 0.5, size=n_rails) * length
+        y_rail = side * (0.5 * width - 0.06) + rng.normal(0.0, 0.02, size=n_rails)
+        alpha_rail = (x_rail + 0.5 * length) / length
+        z_rail = alpha_rail * rise + rng.uniform(0.82, 1.02, size=n_rails)
+        parts.append(np.column_stack((x_rail, y_rail, z_rail)))
+    local = np.vstack(parts)
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, local[:, 0], local[:, 1], local[:, 2]
+    )
+
+
+def _generate_platform_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    *,
+    yaw: float,
+) -> np.ndarray:
+    """Generate raised outdoor platform/deck."""
+    if n_points <= 0:
+        return np.empty((0, 4), dtype=np.float64)
+    deck_height = float(rng.uniform(0.35, 1.2))
+    deck = _sample_cuboid_surface_local(
+        rng,
+        int(n_points),
+        length=float(rng.uniform(1.8, 5.6)),
+        width=float(rng.uniform(1.6, 4.4)),
+        height=deck_height,
+        z_base=0.0,
+    )
+    return _assemble_structure_points(
+        rng, terrain_fn, x_center, y_center, yaw, deck[:, 0], deck[:, 1], deck[:, 2]
+    )
+
+
+def _sample_scene_structure_type_ratios(rng: np.random.Generator) -> Dict[str, float]:
+    """Sample scene-specific structure type ratios when no custom distribution is provided."""
+    alpha = np.array(
+        [max(0.45, 18.0 * DEFAULT_STRUCTURE_TYPE_RATIOS[structure_type]) for structure_type in STRUCTURE_TYPES],
+        dtype=np.float64,
+    )
+    weights = rng.dirichlet(alpha)
+    return {
+        structure_type: float(weights[index])
+        for index, structure_type in enumerate(STRUCTURE_TYPES)
+    }
+
+
+def _generate_structure_object_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    n_points: int,
+    x_center: float,
+    y_center: float,
+    structure_type: str,
+    area_size: Tuple[float, float],
+) -> np.ndarray:
+    """Generate one structure instance of the requested type."""
+    structure_type_id = str(structure_type).strip().lower()
+    if structure_type_id == "fence":
+        return _generate_linear_barrier_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            length=float(rng.uniform(8.0, 48.0)),
+            height=float(rng.uniform(1.3, 2.1)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+            width=0.08,
+            rail_levels=(0.72, 1.28),
+            post_spacing=float(rng.uniform(2.0, 3.5)),
+            solid=False,
+        )
+    if structure_type_id == "railing":
+        return _generate_linear_barrier_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            length=float(rng.uniform(4.0, 26.0)),
+            height=float(rng.uniform(0.95, 1.35)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+            width=0.07,
+            rail_levels=(0.62, 1.02),
+            post_spacing=float(rng.uniform(1.5, 2.4)),
+            solid=False,
+        )
+    if structure_type_id == "enclosure":
+        return _generate_rectangular_enclosure_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            size_x=float(rng.uniform(3.0, 9.0)),
+            size_y=float(rng.uniform(3.0, 9.0)),
+            height=float(rng.uniform(1.0, 1.8)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "guardrail":
+        return _generate_linear_barrier_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            length=float(rng.uniform(7.0, 32.0)),
+            height=float(rng.uniform(0.85, 1.15)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+            width=0.16,
+            rail_levels=(0.54, 0.88),
+            post_spacing=float(rng.uniform(2.2, 3.8)),
+            solid=False,
+        )
+    if structure_type_id == "retaining_wall":
+        return _generate_linear_barrier_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            length=float(rng.uniform(4.0, 20.0)),
+            height=float(rng.uniform(1.2, 3.6)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+            width=float(rng.uniform(0.22, 0.46)),
+            solid=True,
+        )
+    if structure_type_id == "parapet":
+        return _generate_linear_barrier_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            length=float(rng.uniform(4.0, 18.0)),
+            height=float(rng.uniform(0.72, 1.25)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+            width=float(rng.uniform(0.16, 0.32)),
+            solid=True,
+        )
+    if structure_type_id == "stone_wall":
+        return _generate_linear_barrier_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            length=float(rng.uniform(3.0, 16.0)),
+            height=float(rng.uniform(0.7, 1.7)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+            width=float(rng.uniform(0.28, 0.52)),
+            solid=True,
+            xy_noise=0.016,
+            z_noise=0.018,
+        )
+    if structure_type_id == "pole_support":
+        return _generate_support_points(
+            rng=rng,
+            terrain_fn=terrain_fn,
+            n_points=int(n_points),
+            x_center=x_center,
+            y_center=y_center,
+            height=float(rng.uniform(3.5, 12.0)),
+        )
+    if structure_type_id == "lamp":
+        return _generate_lamp_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            height=float(rng.uniform(3.8, 8.5)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "road_sign":
+        return _generate_road_sign_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            height=float(rng.uniform(2.0, 4.2)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "traffic_light":
+        return _generate_traffic_light_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            height=float(rng.uniform(3.6, 6.2)),
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "bench":
+        return _generate_bench_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "trash_bin":
+        return _generate_trash_bin_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "bike_rack":
+        return _generate_bike_rack_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "bollard":
+        return _generate_bollard_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "fountain":
+        return _generate_fountain_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "pedestal":
+        return _generate_pedestal_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "monument":
+        return _generate_monument_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "stairs":
+        return _generate_stairs_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "ramp":
+        return _generate_ramp_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+    if structure_type_id == "platform":
+        return _generate_platform_points(
+            rng,
+            terrain_fn,
+            n_points,
+            x_center,
+            y_center,
+            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+        )
+
+    footbridge_length = float(rng.uniform(7.0, max(14.0, 0.32 * min(area_size))))
+    return _generate_bridge_points(
+        rng=rng,
+        terrain_fn=terrain_fn,
+        n_points=int(n_points),
+        x_center=x_center,
+        y_center=y_center,
+        length=footbridge_length,
+        width=float(rng.uniform(1.8, 3.8)),
+        clearance=float(rng.uniform(0.8, 2.8)),
+        yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
+    )
+
+
 def _sample_cuboid_surface_local(
     rng: np.random.Generator,
     n_points: int,
@@ -1966,6 +3806,7 @@ def place_objects(
     building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
     building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
     num_structures: int = 10,
+    structure_type_ratios: Dict[str, float] | None = None,
     num_vehicles: int = 24,
     vehicle_type_ratios: Dict[str, float] | None = None,
     tree_crown_type_ratios: Dict[str, float] | None = None,
@@ -2192,7 +4033,7 @@ def place_objects(
             )
 
     # ------------------------------------------------------------------
-    # Class 5: structures (fully randomized type + parameters, incl. bridges)
+    # Class 5: structures
     # ------------------------------------------------------------------
     n_structure_points = int(points_per_class.get(5, 0))
     if n_structure_points > 0:
@@ -2203,69 +4044,37 @@ def place_objects(
         struct_forbidden = [
             (cx, cy, sx + 2.0, sy + 2.0) for cx, cy, sx, sy in building_rects
         ]
-        structure_types = rng.choice(
-            ["fence", "support", "lattice", "bridge"],
-            size=n_struct_eff,
-            p=[0.32, 0.24, 0.20, 0.24],
+        structure_weights = (
+            structure_type_ratios
+            if structure_type_ratios is not None
+            else _sample_scene_structure_type_ratios(rng)
         )
-        if n_struct_eff >= 3 and np.all(structure_types != "bridge") and rng.random() < 0.75:
-            structure_types[int(rng.integers(0, n_struct_eff))] = "bridge"
+        structure_types = rng.choice(
+            STRUCTURE_TYPES,
+            size=n_struct_eff,
+            p=[structure_weights[structure_type] for structure_type in STRUCTURE_TYPES],
+        )
+        if (
+            n_struct_eff >= 4
+            and np.all(structure_types != "footbridge")
+            and rng.random() < 0.45
+        ):
+            structure_types[int(rng.integers(0, n_struct_eff))] = "footbridge"
         for n_pts, structure_type in zip(per_struct, structure_types):
             cx, cy = _sample_single_xy(
                 rng, area_size=area_size, forbidden_rects=struct_forbidden, margin=0.2
             )
-            if structure_type == "fence":
-                cloud_parts.append(
-                    _generate_fence_points(
-                        rng=rng,
-                        terrain_fn=terrain_fn,
-                        n_points=int(n_pts),
-                        x_center=cx,
-                        y_center=cy,
-                        length=float(rng.uniform(8.0, 46.0)),
-                        angle=float(rng.uniform(0.0, 2.0 * np.pi)),
-                    )
+            cloud_parts.append(
+                _generate_structure_object_points(
+                    rng=rng,
+                    terrain_fn=terrain_fn,
+                    n_points=int(n_pts),
+                    x_center=cx,
+                    y_center=cy,
+                    structure_type=str(structure_type),
+                    area_size=area_size,
                 )
-            elif structure_type == "support":
-                cloud_parts.append(
-                    _generate_support_points(
-                        rng=rng,
-                        terrain_fn=terrain_fn,
-                        n_points=int(n_pts),
-                        x_center=cx,
-                        y_center=cy,
-                        height=float(rng.uniform(3.5, 12.0)),
-                    )
-                )
-            else:
-                if structure_type == "lattice":
-                    cloud_parts.append(
-                        _generate_lattice_structure_points(
-                            rng=rng,
-                            terrain_fn=terrain_fn,
-                            n_points=int(n_pts),
-                            x_center=cx,
-                            y_center=cy,
-                            width=float(rng.uniform(2.0, 7.0)),
-                            length=float(rng.uniform(3.0, 12.0)),
-                            height=float(rng.uniform(3.0, 11.0)),
-                            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
-                        )
-                    )
-                else:
-                    cloud_parts.append(
-                        _generate_bridge_points(
-                            rng=rng,
-                            terrain_fn=terrain_fn,
-                            n_points=int(n_pts),
-                            x_center=cx,
-                            y_center=cy,
-                            length=float(rng.uniform(10.0, max(20.0, 0.42 * min(area_size)))),
-                            width=float(rng.uniform(2.8, 7.8)),
-                            clearance=float(rng.uniform(1.2, 5.2)),
-                            yaw=float(rng.uniform(0.0, 2.0 * np.pi)),
-                        )
-                    )
+            )
 
     # ------------------------------------------------------------------
     # Class 6: vehicles (car / truck / bus on roads and plazas)
@@ -2601,6 +4410,9 @@ def _print_scene_params(
     building_floor_min: int,
     building_floor_max: int,
     building_random_yaw: bool,
+    structure_type_ratios: Dict[str, float] | None,
+    structure_count_overridden: bool,
+    structure_type_distribution_overridden: bool,
     vehicle_type_ratios: Dict[str, float],
     tree_crown_type_ratios: Dict[str, float] | None,
     tree_count_overridden: bool,
@@ -2650,6 +4462,14 @@ def _print_scene_params(
         print(f"Building roof type distribution: {building_distribution}")
     else:
         print("Building roof type distribution: random per scene")
+    if structure_type_distribution_overridden and structure_type_ratios is not None:
+        structure_distribution = ", ".join(
+            f"{STRUCTURE_TYPE_NAMES[structure_type]}={structure_type_ratios[structure_type] * 100.0:.1f}%"
+            for structure_type in STRUCTURE_TYPES
+        )
+        print(f"Structure type distribution: {structure_distribution}")
+    else:
+        print("Structure type distribution: random per scene")
     if tree_crown_type_distribution_overridden and tree_crown_type_ratios is not None:
         tree_distribution = ", ".join(
             f"{TREE_CROWN_TYPE_NAMES[crown_type]}={tree_crown_type_ratios[crown_type] * 100.0:.1f}%"
@@ -2660,6 +4480,8 @@ def _print_scene_params(
         print("Tree crown type distribution: random per scene")
     if building_count_overridden:
         print("Building count mode: custom override")
+    if structure_count_overridden:
+        print("Structure count mode: custom override")
     if tree_count_overridden:
         print("Tree count mode: custom override")
     if vehicle_count_overridden:
@@ -2733,6 +4555,8 @@ def _run_pipeline(
     building_floor_min: int = int(BUILDING_DEFAULTS["building_floor_min"]),
     building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
     building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
+    structure_count: int | None = None,
+    structure_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     shrub_count: int | None = None,
@@ -2782,6 +4606,8 @@ def _run_pipeline(
         raise ValueError("`tree_count` must be > 0 when provided.")
     if building_count is not None and int(building_count) <= 0:
         raise ValueError("`building_count` must be > 0 when provided.")
+    if structure_count is not None and int(structure_count) <= 0:
+        raise ValueError("`structure_count` must be > 0 when provided.")
     floor_min = int(building_floor_min)
     floor_max = int(building_floor_max)
     if floor_min <= 0:
@@ -2799,6 +4625,12 @@ def _run_pipeline(
         if building_roof_type_distribution_overridden
         else None
     )
+    structure_type_distribution_overridden = structure_type_percentages is not None
+    structure_type_ratios = (
+        _structure_type_ratios_from_percentages(structure_type_percentages)
+        if structure_type_distribution_overridden
+        else None
+    )
     tree_crown_type_distribution_overridden = tree_crown_type_percentages is not None
     tree_crown_type_ratios = (
         _tree_crown_type_ratios_from_percentages(tree_crown_type_percentages)
@@ -2812,6 +4644,7 @@ def _run_pipeline(
         randomize_counts=randomize_object_counts,
     )
     building_count_overridden = building_count is not None
+    structure_count_overridden = structure_count is not None
     tree_count_overridden = tree_count is not None
     vehicle_count_overridden = vehicle_count is not None
     shrub_count_overridden = shrub_count is not None
@@ -2821,6 +4654,11 @@ def _run_pipeline(
         if building_count_int <= 0:
             raise ValueError("`building_count` must be > 0 when provided.")
         object_counts["num_buildings"] = building_count_int
+    if structure_count_overridden:
+        structure_count_int = int(structure_count)
+        if structure_count_int <= 0:
+            raise ValueError("`structure_count` must be > 0 when provided.")
+        object_counts["num_structures"] = structure_count_int
     if tree_count_overridden:
         tree_count_int = int(tree_count)
         if tree_count_int <= 0:
@@ -2850,6 +4688,9 @@ def _run_pipeline(
         building_floor_min=floor_min,
         building_floor_max=floor_max,
         building_random_yaw=bool(building_random_yaw),
+        structure_type_ratios=structure_type_ratios,
+        structure_count_overridden=structure_count_overridden,
+        structure_type_distribution_overridden=structure_type_distribution_overridden,
         vehicle_type_ratios=vehicle_type_ratios,
         tree_crown_type_ratios=tree_crown_type_ratios,
         tree_count_overridden=tree_count_overridden,
@@ -2895,6 +4736,7 @@ def _run_pipeline(
         building_floor_max=floor_max,
         building_random_yaw=bool(building_random_yaw),
         num_structures=num_structures,
+        structure_type_ratios=structure_type_ratios,
         num_vehicles=num_vehicles,
         vehicle_type_ratios=vehicle_type_ratios,
         tree_crown_type_ratios=tree_crown_type_ratios,
@@ -2967,6 +4809,8 @@ def generate_point_cloud(
     building_floor_min: int = int(BUILDING_DEFAULTS["building_floor_min"]),
     building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
     building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
+    structure_count: int | None = None,
+    structure_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     shrub_count: int | None = None,
@@ -2991,6 +4835,8 @@ def generate_point_cloud(
       - optional custom number of building instances
       - optional custom building roof type percentages
       - configurable random building floor range and arbitrary Z-rotation
+      - optional custom number of structure instances
+      - optional custom structure type percentages
       - optional custom number of vehicle instances
       - optional custom vehicle type percentages [car, truck, bus]
       - optional custom low vegetation controls (shrubs + grass patches)
@@ -3018,6 +4864,8 @@ def generate_point_cloud(
         building_floor_min=int(building_floor_min),
         building_floor_max=int(building_floor_max),
         building_random_yaw=bool(building_random_yaw),
+        structure_count=structure_count,
+        structure_type_percentages=structure_type_percentages,
         vehicle_count=vehicle_count,
         vehicle_type_percentages=vehicle_type_percentages,
         shrub_count=shrub_count,
@@ -3052,6 +4900,8 @@ def main(
     building_floor_min: int = int(BUILDING_DEFAULTS["building_floor_min"]),
     building_floor_max: int = int(BUILDING_DEFAULTS["building_floor_max"]),
     building_random_yaw: bool = bool(BUILDING_DEFAULTS["building_random_yaw"]),
+    structure_count: int | None = None,
+    structure_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     shrub_count: int | None = None,
@@ -3075,6 +4925,7 @@ def main(
       - uses default class distribution unless custom percentages are provided
       - uses default high-vegetation generation unless custom values are provided
       - uses default building generation unless custom values are provided
+      - uses random structure generation unless custom values are provided
       - uses default vehicle count and type distribution unless custom values are provided
       - uses default low-vegetation generation unless custom values are provided
       - prints stats
@@ -3103,6 +4954,8 @@ def main(
         building_floor_min=int(building_floor_min),
         building_floor_max=int(building_floor_max),
         building_random_yaw=bool(building_random_yaw),
+        structure_count=structure_count,
+        structure_type_percentages=structure_type_percentages,
         vehicle_count=vehicle_count,
         vehicle_type_percentages=vehicle_type_percentages,
         shrub_count=shrub_count,
@@ -3122,6 +4975,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     """Create CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Generate synthetic labeled landscape point cloud."
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to YAML configuration file with generation settings.",
     )
     parser.add_argument(
         "--total-points",
@@ -3251,6 +5109,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Enable arbitrary random building rotation around Z axis.",
     )
     parser.add_argument(
+        "--structure-count",
+        type=int,
+        help="Optional custom number of generated structures (class 5).",
+    )
+    parser.add_argument(
+        "--structure-type-percentages",
+        type=float,
+        nargs=len(STRUCTURE_TYPES),
+        metavar="PCT",
+        help=(
+            "Optional structure type shares in percent for "
+            f"{list(STRUCTURE_TYPES)}."
+        ),
+    )
+    parser.add_argument(
         "--vehicle-count",
         type=int,
         help="Optional custom number of generated vehicle instances.",
@@ -3347,45 +5220,117 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _collect_explicit_cli_dests(
+    parser: argparse.ArgumentParser,
+    argv: Sequence[str],
+) -> set[str]:
+    """Track which CLI options were explicitly provided so config files can be merged safely."""
+    option_to_dest: Dict[str, str] = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            option_to_dest[option] = action.dest
+
+    explicit_dests: set[str] = set()
+    for token in argv:
+        if token == "--":
+            break
+        if not token.startswith("-") or token == "-":
+            continue
+        option = token.split("=", 1)[0]
+        dest = option_to_dest.get(option)
+        if dest is not None:
+            explicit_dests.add(dest)
+    return explicit_dests
+
+
 def cli(argv: Sequence[str] | None = None) -> int:
     """Command line entry point."""
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
+    args = parser.parse_args(raw_argv)
+    explicit_dests = _collect_explicit_cli_dests(parser, raw_argv)
+
+    config_values = default_generation_config()
+    if args.config is not None:
+        try:
+            config_values = load_generation_config(args.config)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+    pipeline_kwargs = generation_config_to_pipeline_kwargs(config_values)
+
+    if "total_points" in explicit_dests:
+        pipeline_kwargs["total_points"] = int(args.total_points)
+    if "area_width" in explicit_dests:
+        pipeline_kwargs["area_width"] = float(args.area_width)
+    if "area_length" in explicit_dests:
+        pipeline_kwargs["area_length"] = float(args.area_length)
+    if "terrain_relief" in explicit_dests:
+        pipeline_kwargs["terrain_relief"] = float(args.terrain_relief)
+    if "random_object_counts" in explicit_dests:
+        pipeline_kwargs["randomize_object_counts"] = bool(args.random_object_counts)
+    if "seed" in explicit_dests:
+        pipeline_kwargs["seed"] = int(args.seed)
+    if "class_percentages" in explicit_dests:
+        pipeline_kwargs["class_percentages"] = args.class_percentages
+    if "tree_count" in explicit_dests:
+        pipeline_kwargs["tree_count"] = args.tree_count
+    if "tree_crown_type_percentages" in explicit_dests:
+        pipeline_kwargs["tree_crown_type_percentages"] = args.tree_crown_type_percentages
+    if "random_tree_crown_size" in explicit_dests:
+        pipeline_kwargs["random_tree_crown_size"] = bool(args.random_tree_crown_size)
+    if "tree_max_crown_diameter" in explicit_dests:
+        pipeline_kwargs["tree_max_crown_diameter"] = float(args.tree_max_crown_diameter)
+    if "tree_max_crown_top_height" in explicit_dests:
+        pipeline_kwargs["tree_max_crown_top_height"] = float(args.tree_max_crown_top_height)
+    if "tree_min_crown_bottom_height" in explicit_dests:
+        pipeline_kwargs["tree_min_crown_bottom_height"] = float(
+            args.tree_min_crown_bottom_height
+        )
+    if "building_count" in explicit_dests:
+        pipeline_kwargs["building_count"] = args.building_count
+    if "building_roof_type_percentages" in explicit_dests:
+        pipeline_kwargs["building_roof_type_percentages"] = args.building_roof_type_percentages
+    if "building_floor_min" in explicit_dests:
+        pipeline_kwargs["building_floor_min"] = int(args.building_floor_min)
+    if "building_floor_max" in explicit_dests:
+        pipeline_kwargs["building_floor_max"] = int(args.building_floor_max)
+    if "building_random_yaw" in explicit_dests:
+        pipeline_kwargs["building_random_yaw"] = bool(args.building_random_yaw)
+    if "structure_count" in explicit_dests:
+        pipeline_kwargs["structure_count"] = args.structure_count
+    if "structure_type_percentages" in explicit_dests:
+        pipeline_kwargs["structure_type_percentages"] = args.structure_type_percentages
+    if "vehicle_count" in explicit_dests:
+        pipeline_kwargs["vehicle_count"] = args.vehicle_count
+    if "vehicle_type_percentages" in explicit_dests:
+        pipeline_kwargs["vehicle_type_percentages"] = args.vehicle_type_percentages
+    if "shrub_count" in explicit_dests:
+        pipeline_kwargs["shrub_count"] = args.shrub_count
+    if "random_shrub_size" in explicit_dests:
+        pipeline_kwargs["random_shrub_size"] = bool(args.random_shrub_size)
+    if "shrub_max_diameter" in explicit_dests:
+        pipeline_kwargs["shrub_max_diameter"] = float(args.shrub_max_diameter)
+    if "shrub_max_top_height" in explicit_dests:
+        pipeline_kwargs["shrub_max_top_height"] = float(args.shrub_max_top_height)
+    if "shrub_min_bottom_height" in explicit_dests:
+        pipeline_kwargs["shrub_min_bottom_height"] = float(args.shrub_min_bottom_height)
+    if "grass_patch_count" in explicit_dests:
+        pipeline_kwargs["grass_patch_count"] = args.grass_patch_count
+    if "random_grass_patch_size" in explicit_dests:
+        pipeline_kwargs["random_grass_patch_size"] = bool(args.random_grass_patch_size)
+    if "grass_patch_max_size_x" in explicit_dests:
+        pipeline_kwargs["grass_patch_max_size_x"] = float(args.grass_patch_max_size_x)
+    if "grass_patch_max_size_y" in explicit_dests:
+        pipeline_kwargs["grass_patch_max_size_y"] = float(args.grass_patch_max_size_y)
+    if "grass_max_height" in explicit_dests:
+        pipeline_kwargs["grass_max_height"] = float(args.grass_max_height)
 
     _run_pipeline(
-        total_points=int(args.total_points),
         show_visualization=not args.no_visualize,
         save_csv=not args.no_csv,
         save_ply=not args.no_ply,
-        area_width=float(args.area_width),
-        area_length=float(args.area_length),
-        terrain_relief=float(args.terrain_relief),
-        randomize_object_counts=bool(args.random_object_counts),
-        seed=int(args.seed),
-        class_percentages=args.class_percentages,
-        tree_count=args.tree_count,
-        tree_crown_type_percentages=args.tree_crown_type_percentages,
-        random_tree_crown_size=bool(args.random_tree_crown_size),
-        tree_max_crown_diameter=float(args.tree_max_crown_diameter),
-        tree_max_crown_top_height=float(args.tree_max_crown_top_height),
-        tree_min_crown_bottom_height=float(args.tree_min_crown_bottom_height),
-        building_count=args.building_count,
-        building_roof_type_percentages=args.building_roof_type_percentages,
-        building_floor_min=int(args.building_floor_min),
-        building_floor_max=int(args.building_floor_max),
-        building_random_yaw=bool(args.building_random_yaw),
-        vehicle_count=args.vehicle_count,
-        vehicle_type_percentages=args.vehicle_type_percentages,
-        shrub_count=args.shrub_count,
-        random_shrub_size=bool(args.random_shrub_size),
-        shrub_max_diameter=float(args.shrub_max_diameter),
-        shrub_max_top_height=float(args.shrub_max_top_height),
-        shrub_min_bottom_height=float(args.shrub_min_bottom_height),
-        grass_patch_count=args.grass_patch_count,
-        random_grass_patch_size=bool(args.random_grass_patch_size),
-        grass_patch_max_size_x=float(args.grass_patch_max_size_x),
-        grass_patch_max_size_y=float(args.grass_patch_max_size_y),
-        grass_max_height=float(args.grass_max_height),
+        **pipeline_kwargs,
     )
     return 0
 
