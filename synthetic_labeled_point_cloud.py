@@ -28,6 +28,15 @@ import numpy as np
 import yaml
 
 
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_DIR / "data"
+
+
+def ensure_data_dir() -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return DATA_DIR
+
+
 CLASS_NAMES: Dict[int, str] = {
     0: "Natural surface",
     1: "Artificial surface",
@@ -5326,11 +5335,13 @@ def _run_pipeline(
     _print_stats(labels)
 
     if save_csv:
-        export_to_csv(point_cloud, Path("synthetic_landscape_point_cloud.csv"))
-        print("Saved CSV: synthetic_landscape_point_cloud.csv")
+        csv_path = ensure_data_dir() / "synthetic_landscape_point_cloud.csv"
+        export_to_csv(point_cloud, csv_path)
+        print(f"Saved CSV: {csv_path}")
     if save_ply:
-        export_to_ply(point_cloud, Path("synthetic_landscape_point_cloud.ply"))
-        print("Saved PLY: synthetic_landscape_point_cloud.ply")
+        ply_path = ensure_data_dir() / "synthetic_landscape_point_cloud.ply"
+        export_to_ply(point_cloud, ply_path)
+        print(f"Saved PLY: {ply_path}")
 
     if show_visualization:
         visualize_point_cloud(point_cloud[:, :3], labels)

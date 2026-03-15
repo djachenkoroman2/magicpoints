@@ -76,7 +76,14 @@ from PyQt5.QtWidgets import (
 
 DEFAULT_MAX_POINTS = 2_000_000
 DEFAULT_POINT_SIZE = 3.0
-ICONS_DIR = Path(__file__).resolve().parent / "assets" / "icons"
+PROJECT_DIR = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_DIR / "data"
+ICONS_DIR = PROJECT_DIR / "assets" / "icons"
+
+
+def ensure_data_dir() -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return DATA_DIR
 
 
 def normalize_field_name(name: str) -> str:
@@ -362,7 +369,7 @@ class SplitByLabelDialog(QDialog):
         self._update_ok_button_state()
 
     def _choose_directory(self) -> None:
-        start_dir = self.output_directory() or str(Path.cwd())
+        start_dir = self.output_directory() or str(ensure_data_dir())
         path = QFileDialog.getExistingDirectory(
             self,
             "Select Output Directory",
@@ -466,7 +473,7 @@ class DBSCANDialog(QDialog):
     def _choose_output_file(self) -> None:
         start_path = self.output_path()
         if not start_path:
-            start_path = str(Path.cwd() / "dbscan_clusters.yaml")
+            start_path = str(ensure_data_dir() / "dbscan_clusters.yaml")
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save DBSCAN Result",
@@ -2196,7 +2203,7 @@ class SyntheticGenerationDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Generation Configuration",
-            default_name,
+            str(ensure_data_dir() / default_name),
             "YAML Files (*.yaml *.yml);;All Files (*)",
         )
         if not path:
@@ -2224,7 +2231,7 @@ class SyntheticGenerationDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import Generation Configuration",
-            "",
+            str(ensure_data_dir()),
             "YAML Files (*.yaml *.yml);;All Files (*)",
         )
         if not path:
@@ -3589,11 +3596,11 @@ class MainWindow(QMainWindow):
         self._cluster_source_path: str = ""
         self._last_generation_params = SyntheticGenerationParams()
         self._last_split_prefix = "split"
-        self._last_split_dir = str(Path.cwd())
+        self._last_split_dir = str(ensure_data_dir())
         self._last_dbscan_epsilon = 1.0
         self._last_dbscan_min_pts = 8
-        self._last_dbscan_output_path = str(Path.cwd() / "dbscan_clusters.yaml")
-        self._last_cluster_yaml_dir = str(Path.cwd())
+        self._last_dbscan_output_path = str(ensure_data_dir() / "dbscan_clusters.yaml")
+        self._last_cluster_yaml_dir = str(ensure_data_dir())
 
         self.setWindowTitle("MagicPoints")
         self.resize(1200, 800)
@@ -3773,7 +3780,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Point Cloud",
-            "",
+            str(ensure_data_dir()),
             "Point Cloud Files (*.txt *.ply);;TXT Files (*.txt);;PLY Files (*.ply);;All Files (*)",
         )
         if path:
@@ -3884,8 +3891,9 @@ class MainWindow(QMainWindow):
     def _default_dbscan_output_path(self) -> str:
         if self.current_cloud is not None and self.current_cloud.file_path:
             current_path = Path(self.current_cloud.file_path)
-            if current_path.suffix.lower() in {".txt", ".ply"}:
-                return str(current_path.with_name(f"{current_path.stem}_dbscan.yaml"))
+            stem = current_path.stem.strip()
+            if stem:
+                return str(ensure_data_dir() / f"{stem}_dbscan.yaml")
         return self._last_dbscan_output_path
 
     def _cluster_boxes_from_result(self, result) -> Tuple[ClusterBoundingBoxData, ...]:
@@ -4351,7 +4359,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Generated Cloud as PLY",
-            default_name,
+            str(ensure_data_dir() / default_name),
             "PLY Files (*.ply);;All Files (*)",
         )
         if not path:
