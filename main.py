@@ -1896,7 +1896,7 @@ class SyntheticGenerationDialog(QDialog):
 
         note = QLabel(
             (
-                "Generation uses synthetic_labeled_point_cloud.py pipeline. "
+                "Generation uses utils/synthetic_labeled_point_cloud.py pipeline. "
                 "When custom distributions are enabled, percentages must sum to 100%."
             ),
             self,
@@ -1942,12 +1942,12 @@ class SyntheticGenerationDialog(QDialog):
         if self._synthetic_module is not None:
             return self._synthetic_module
         try:
-            import synthetic_labeled_point_cloud as synthetic_module
+            from utils import synthetic_labeled_point_cloud as synthetic_module
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
                 "Generator Error",
-                f"Failed to import synthetic_labeled_point_cloud.py:\n{exc}",
+                f"Failed to import utils/synthetic_labeled_point_cloud.py:\n{exc}",
             )
             return None
         self._synthetic_module = synthetic_module
@@ -4397,12 +4397,12 @@ class MainWindow(QMainWindow):
         if self._synthetic_module is not None:
             return self._synthetic_module
         try:
-            import synthetic_labeled_point_cloud as synthetic_module
+            from utils import synthetic_labeled_point_cloud as synthetic_module
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
                 "Generator Error",
-                f"Failed to import synthetic_labeled_point_cloud.py:\n{exc}",
+                f"Failed to import utils/synthetic_labeled_point_cloud.py:\n{exc}",
             )
             return None
         self._synthetic_module = synthetic_module
@@ -4412,12 +4412,12 @@ class MainWindow(QMainWindow):
         if self._dbscan_module is not None:
             return self._dbscan_module
         try:
-            import app_dbscan_alg as dbscan_module
+            from utils import app_dbscan_alg as dbscan_module
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
                 "DBSCAN Error",
-                f"Failed to import app_dbscan_alg.py:\n{exc}",
+                f"Failed to import utils/app_dbscan_alg.py:\n{exc}",
             )
             return None
         self._dbscan_module = dbscan_module
