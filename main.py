@@ -3552,6 +3552,7 @@ class MainWindow(QMainWindow):
         self._last_dbscan_min_pts = 8
         self._last_dbscan_output_path = str(ensure_data_dir() / "dbscan_clusters.yaml")
         self._last_cluster_yaml_dir = str(ensure_data_dir())
+        self._last_view_image_dir = str(ensure_data_dir())
 
         self.setWindowTitle("MagicPoints")
         self.resize(1200, 800)
@@ -3604,6 +3605,15 @@ class MainWindow(QMainWindow):
         self.dbscan_action.setToolTip("Run DBSCAN clustering on the current point cloud")
         self.dbscan_action.setEnabled(False)
         self.dbscan_action.triggered.connect(self.run_dbscan_dialog)
+
+        self.save_view_png_action = QAction(
+            self._icon("save_view_png", QStyle.SP_DialogSaveButton),
+            "Save View as PNG...",
+            self,
+        )
+        self.save_view_png_action.setToolTip("Save the current 3D view to a PNG image")
+        self.save_view_png_action.setEnabled(False)
+        self.save_view_png_action.triggered.connect(self.save_current_view_as_png)
 
         self.fit_action = QAction(self._icon("fit", QStyle.SP_ArrowUp), "Fit to View", self)
         self.fit_action.setToolTip("Frame the whole cloud in the viewport")
@@ -3690,6 +3700,7 @@ class MainWindow(QMainWindow):
         edit_menu = menu.addMenu("Edit")
         edit_menu.addAction(self.split_action)
         edit_menu.addAction(self.dbscan_action)
+        edit_menu.addAction(self.save_view_png_action)
 
         generate_menu = menu.addMenu("Generate")
         generate_menu.addAction(self.generate_synthetic_action)
@@ -3727,6 +3738,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.split_action)
         toolbar.addAction(self.dbscan_action)
+        toolbar.addAction(self.save_view_png_action)
         toolbar.addSeparator()
         toolbar.addAction(self.fit_action)
         toolbar.addAction(self.reset_action)
@@ -3855,6 +3867,14 @@ class MainWindow(QMainWindow):
             if stem:
                 return str(ensure_data_dir() / f"{stem}_dbscan.yaml")
         return self._last_dbscan_output_path
+
+    def _default_view_image_path(self) -> str:
+        if self.current_cloud is not None and self.current_cloud.file_path:
+            current_path = Path(self.current_cloud.file_path)
+            stem = current_path.stem.strip()
+            if stem:
+                return str(ensure_data_dir() / f"{stem}_view.png")
+        return str(Path(self._last_view_image_dir) / "current_view.png")
 
     def _cluster_boxes_from_result(self, result) -> Tuple[ClusterBoundingBoxData, ...]:
         boxes: List[ClusterBoundingBoxData] = []
@@ -3994,6 +4014,45 @@ class MainWindow(QMainWindow):
             "DBSCAN Complete",
             f"Clusters found: {cluster_count}\nSaved YAML:\n{saved_path}",
         )
+
+    def save_current_view_as_png(self) -> None:
+        if self.current_cloud is None:
+            QMessageBox.information(self, "No Cloud", "Open a point cloud first.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Current View as PNG",
+            self._default_view_image_path(),
+            "PNG Images (*.png);;All Files (*)",
+        )
+        if not path:
+            return
+
+        out_path = Path(path)
+        if out_path.suffix.lower() != ".png":
+            out_path = out_path.with_suffix(".png")
+
+        image = self.gl_widget.grabFramebuffer()
+        if image.isNull():
+            QMessageBox.critical(
+                self,
+                "Save Error",
+                "Failed to capture the current view from the OpenGL viewport.",
+            )
+            return
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if not image.save(str(out_path), "PNG"):
+            QMessageBox.critical(
+                self,
+                "Save Error",
+                f"Failed to save PNG image:\n{out_path}",
+            )
+            return
+
+        self._last_view_image_dir = str(out_path.parent)
+        self.statusBar().showMessage(f"Saved current view: {out_path}", 7000)
 
     def fit_to_view(self) -> None:
         self.gl_widget.fit_to_view()
@@ -4375,6 +4434,7 @@ class MainWindow(QMainWindow):
         self._update_view_actions_enabled(cloud)
         self.split_action.setEnabled(cloud.has_labels)
         self.dbscan_action.setEnabled(cloud.loaded_count > 0)
+        self.save_view_png_action.setEnabled(cloud.loaded_count > 0)
         self._update_status_bar()
 
     def _get_synthetic_module(self):
