@@ -16,6 +16,7 @@ from OpenGL.GL import (
     GL_COLOR_BUFFER_BIT,
     GL_DEPTH_BUFFER_BIT,
     GL_DEPTH_TEST,
+    GL_LINES,
     GL_DYNAMIC_DRAW,
     GL_FALSE,
     GL_FLOAT,
@@ -30,6 +31,7 @@ from OpenGL.GL import (
     glClearColor,
     glDeleteBuffers,
     glDeleteProgram,
+    glDisable,
     glDisableVertexAttribArray,
     glDrawArrays,
     glEnable,
@@ -37,6 +39,7 @@ from OpenGL.GL import (
     glGenBuffers,
     glGetAttribLocation,
     glGetUniformLocation,
+    glLineWidth,
     glUniform1f,
     glUniformMatrix4fv,
     glUseProgram,
@@ -129,6 +132,49 @@ def generate_distinct_palette(count: int) -> np.ndarray:
     return palette
 
 
+BOX_EDGE_VERTEX_PAIRS: Tuple[Tuple[int, int], ...] = (
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+)
+
+
+def build_bounding_box_line_vertices(
+    min_corner: Sequence[float],
+    max_corner: Sequence[float],
+) -> np.ndarray:
+    min_xyz = np.asarray(min_corner, dtype=np.float32).reshape(3)
+    max_xyz = np.asarray(max_corner, dtype=np.float32).reshape(3)
+    corners = np.asarray(
+        [
+            [min_xyz[0], min_xyz[1], min_xyz[2]],
+            [max_xyz[0], min_xyz[1], min_xyz[2]],
+            [max_xyz[0], max_xyz[1], min_xyz[2]],
+            [min_xyz[0], max_xyz[1], min_xyz[2]],
+            [min_xyz[0], min_xyz[1], max_xyz[2]],
+            [max_xyz[0], min_xyz[1], max_xyz[2]],
+            [max_xyz[0], max_xyz[1], max_xyz[2]],
+            [min_xyz[0], max_xyz[1], max_xyz[2]],
+        ],
+        dtype=np.float32,
+    )
+    vertices = np.empty((len(BOX_EDGE_VERTEX_PAIRS) * 2, 3), dtype=np.float32)
+    for edge_index, (start_idx, end_idx) in enumerate(BOX_EDGE_VERTEX_PAIRS):
+        target = edge_index * 2
+        vertices[target] = corners[start_idx]
+        vertices[target + 1] = corners[end_idx]
+    return vertices
+
+
 @dataclass
 class PointCloudData:
     points: np.ndarray
@@ -201,6 +247,21 @@ class PointCloudData:
         mapped_indices = np.searchsorted(unique_labels, self.labels)
         self._label_color_cache = np.ascontiguousarray(palette[mapped_indices], dtype=np.float32)
         return self._label_color_cache
+
+
+@dataclass(frozen=True)
+class ClusterBoundingBoxData:
+    cluster_id: int
+    point_count: int
+    min_corner: Tuple[float, float, float]
+    max_corner: Tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class DBSCANDialogParams:
+    epsilon: float
+    min_pts: int
+    output_path: str
 
 
 def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> None:
@@ -344,6 +405,121 @@ class SplitByLabelDialog(QDialog):
                 "The selected output directory does not exist.",
             )
             return
+        super().accept()
+
+
+class DBSCANDialog(QDialog):
+    def __init__(
+        self,
+        cloud_name: str,
+        default_epsilon: float,
+        default_min_pts: int,
+        default_output_path: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("DBSCAN Settings")
+        self.setModal(True)
+
+        self.cloud_edit = QLineEdit(self)
+        self.cloud_edit.setReadOnly(True)
+        self.cloud_edit.setText(cloud_name)
+
+        self.epsilon_spin = QDoubleSpinBox(self)
+        self.epsilon_spin.setDecimals(6)
+        self.epsilon_spin.setRange(0.000001, 1_000_000.0)
+        self.epsilon_spin.setValue(max(0.000001, float(default_epsilon)))
+
+        self.min_pts_spin = QSpinBox(self)
+        self.min_pts_spin.setRange(1, 1_000_000_000)
+        self.min_pts_spin.setValue(max(1, int(default_min_pts)))
+
+        self.output_edit = QLineEdit(self)
+        self.output_edit.setText(default_output_path)
+        self.output_edit.textChanged.connect(self._update_ok_button_state)
+
+        self.output_browse_button = QPushButton("Browse...", self)
+        self.output_browse_button.clicked.connect(self._choose_output_file)
+
+        output_row = QHBoxLayout()
+        output_row.addWidget(self.output_edit)
+        output_row.addWidget(self.output_browse_button)
+
+        form = QFormLayout()
+        form.addRow("Current cloud:", self.cloud_edit)
+        form.addRow("epsilon:", self.epsilon_spin)
+        form.addRow("MinPts:", self.min_pts_spin)
+        form.addRow("Output YAML:", output_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+        self._update_ok_button_state()
+
+    def _choose_output_file(self) -> None:
+        start_path = self.output_path()
+        if not start_path:
+            start_path = str(Path.cwd() / "dbscan_clusters.yaml")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save DBSCAN Result",
+            start_path,
+            "YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not path:
+            return
+        out_path = Path(path)
+        if out_path.suffix.lower() not in {".yaml", ".yml"}:
+            out_path = out_path.with_suffix(".yaml")
+        self.output_edit.setText(str(out_path))
+
+    def _update_ok_button_state(self) -> None:
+        if self.ok_button is None:
+            return
+        self.ok_button.setEnabled(bool(self.output_path()))
+
+    def output_path(self) -> str:
+        return self.output_edit.text().strip()
+
+    def params(self) -> DBSCANDialogParams:
+        output_path = Path(self.output_path())
+        if output_path.suffix.lower() not in {".yaml", ".yml"}:
+            output_path = output_path.with_suffix(".yaml")
+        return DBSCANDialogParams(
+            epsilon=float(self.epsilon_spin.value()),
+            min_pts=int(self.min_pts_spin.value()),
+            output_path=str(output_path),
+        )
+
+    def accept(self) -> None:
+        params = self.params()
+        if params.epsilon <= 0.0:
+            QMessageBox.warning(self, "Invalid epsilon", "`epsilon` must be greater than 0.")
+            return
+        if params.min_pts < 1:
+            QMessageBox.warning(self, "Invalid MinPts", "`MinPts` must be at least 1.")
+            return
+        if not params.output_path:
+            QMessageBox.warning(self, "Invalid Output", "Please choose an output YAML file.")
+            return
+
+        output_path = Path(params.output_path)
+        parent_dir = output_path.parent
+        if str(parent_dir) and not parent_dir.exists():
+            QMessageBox.warning(
+                self,
+                "Invalid Output",
+                "The selected output directory does not exist.",
+            )
+            return
+
         super().accept()
 
 
@@ -2706,6 +2882,7 @@ class PointCloudGLWidget(QOpenGLWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cloud: Optional[PointCloudData] = None
+        self._cluster_boxes: Tuple[ClusterBoundingBoxData, ...] = ()
         self._color_mode: str = "neutral"
         self._background = (0.08, 0.09, 0.11)
         self._neutral_color = np.array([0.82, 0.84, 0.88], dtype=np.float32)
@@ -2713,12 +2890,16 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._program: int = 0
         self._vbo_points: int = 0
         self._vbo_colors: int = 0
+        self._vbo_overlay_points: int = 0
+        self._vbo_overlay_colors: int = 0
         self._a_pos: int = -1
         self._a_color: int = -1
         self._u_mvp: int = -1
         self._u_point_size: int = -1
         self._initialized = False
         self._point_count = 0
+        self._overlay_vertex_count = 0
+        self._overlay_line_width = 2.0
 
         self._fov_y_deg = 50.0
         self._scene_center = np.zeros(3, dtype=np.float32)
@@ -2839,6 +3020,13 @@ class PointCloudGLWidget(QOpenGLWidget):
         if self._initialized:
             self._upload_geometry()
             self._upload_colors()
+            self._upload_cluster_overlay()
+        self.update()
+
+    def set_cluster_boxes(self, boxes: Sequence[ClusterBoundingBoxData]) -> None:
+        self._cluster_boxes = tuple(boxes)
+        if self._initialized:
+            self._upload_cluster_overlay()
         self.update()
 
     def set_color_mode(self, mode: str) -> None:
@@ -2943,11 +3131,14 @@ class PointCloudGLWidget(QOpenGLWidget):
 
         self._vbo_points = glGenBuffers(1)
         self._vbo_colors = glGenBuffers(1)
+        self._vbo_overlay_points = glGenBuffers(1)
+        self._vbo_overlay_colors = glGenBuffers(1)
 
         self._initialized = True
         if self._cloud is not None:
             self._upload_geometry()
             self._upload_colors()
+        self._upload_cluster_overlay()
 
         context = self.context()
         if context is not None:
@@ -2999,6 +3190,25 @@ class PointCloudGLWidget(QOpenGLWidget):
         glDisableVertexAttribArray(self._a_pos)
         glDisableVertexAttribArray(self._a_color)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        if self._overlay_vertex_count > 0:
+            glDisable(GL_DEPTH_TEST)
+            glLineWidth(float(self._overlay_line_width))
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_overlay_points)
+            glEnableVertexAttribArray(self._a_pos)
+            glVertexAttribPointer(self._a_pos, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_overlay_colors)
+            glEnableVertexAttribArray(self._a_color)
+            glVertexAttribPointer(self._a_color, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+            glDrawArrays(GL_LINES, 0, self._overlay_vertex_count)
+            glDisableVertexAttribArray(self._a_pos)
+            glDisableVertexAttribArray(self._a_color)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glEnable(GL_DEPTH_TEST)
+
         glUseProgram(0)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -3319,6 +3529,33 @@ class PointCloudGLWidget(QOpenGLWidget):
         glBufferData(GL_ARRAY_BUFFER, colors.nbytes, colors, GL_DYNAMIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+    def _upload_cluster_overlay(self) -> None:
+        if not self._initialized:
+            return
+
+        if not self._cluster_boxes:
+            self._overlay_vertex_count = 0
+            return
+
+        palette = generate_distinct_palette(len(self._cluster_boxes))
+        all_vertices: List[np.ndarray] = []
+        all_colors: List[np.ndarray] = []
+        for index, box in enumerate(self._cluster_boxes):
+            vertices = build_bounding_box_line_vertices(box.min_corner, box.max_corner)
+            color = np.tile(palette[index], (vertices.shape[0], 1)).astype(np.float32, copy=False)
+            all_vertices.append(vertices)
+            all_colors.append(color)
+
+        overlay_vertices = np.ascontiguousarray(np.vstack(all_vertices), dtype=np.float32)
+        overlay_colors = np.ascontiguousarray(np.vstack(all_colors), dtype=np.float32)
+        self._overlay_vertex_count = int(overlay_vertices.shape[0])
+
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_overlay_points)
+        glBufferData(GL_ARRAY_BUFFER, overlay_vertices.nbytes, overlay_vertices, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_overlay_colors)
+        glBufferData(GL_ARRAY_BUFFER, overlay_colors.nbytes, overlay_colors, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
     def _cleanup_gl(self) -> None:
         self.makeCurrent()
         if self._vbo_points:
@@ -3327,6 +3564,12 @@ class PointCloudGLWidget(QOpenGLWidget):
         if self._vbo_colors:
             glDeleteBuffers(1, [self._vbo_colors])
             self._vbo_colors = 0
+        if self._vbo_overlay_points:
+            glDeleteBuffers(1, [self._vbo_overlay_points])
+            self._vbo_overlay_points = 0
+        if self._vbo_overlay_colors:
+            glDeleteBuffers(1, [self._vbo_overlay_colors])
+            self._vbo_overlay_colors = 0
         if self._program:
             glDeleteProgram(self._program)
             self._program = 0
@@ -3340,10 +3583,17 @@ class MainWindow(QMainWindow):
         self.max_points = max_points
         self.current_cloud: Optional[PointCloudData] = None
         self._synthetic_module = None
+        self._dbscan_module = None
         self._generated_cloud_raw: Optional[np.ndarray] = None
+        self._cluster_boxes: Tuple[ClusterBoundingBoxData, ...] = ()
+        self._cluster_source_path: str = ""
         self._last_generation_params = SyntheticGenerationParams()
         self._last_split_prefix = "split"
         self._last_split_dir = str(Path.cwd())
+        self._last_dbscan_epsilon = 1.0
+        self._last_dbscan_min_pts = 8
+        self._last_dbscan_output_path = str(Path.cwd() / "dbscan_clusters.yaml")
+        self._last_cluster_yaml_dir = str(Path.cwd())
 
         self.setWindowTitle("MagicPoints")
         self.resize(1200, 800)
@@ -3371,6 +3621,14 @@ class MainWindow(QMainWindow):
         self.open_action.setToolTip("Open TXT or PLY point cloud")
         self.open_action.triggered.connect(self.open_file_dialog)
 
+        self.open_clusters_action = QAction(
+            self.style().standardIcon(QStyle.SP_DirOpenIcon),
+            "Open Clusters YAML...",
+            self,
+        )
+        self.open_clusters_action.setToolTip("Load a YAML file with DBSCAN cluster bounding boxes")
+        self.open_clusters_action.triggered.connect(self.open_clusters_yaml_dialog)
+
         self.split_action = QAction(
             self._icon("split", QStyle.SP_FileDialogListView),
             "Split...",
@@ -3379,6 +3637,14 @@ class MainWindow(QMainWindow):
         self.split_action.setToolTip("Split labeled point cloud into one PLY file per class")
         self.split_action.setEnabled(False)
         self.split_action.triggered.connect(self.split_point_cloud_by_label)
+
+        self.dbscan_action = QAction(
+            self.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+            "DBSCAN...",
+            self,
+        )
+        self.dbscan_action.setToolTip("Run DBSCAN clustering on the current point cloud")
+        self.dbscan_action.triggered.connect(self.run_dbscan_dialog)
 
         self.fit_action = QAction(self._icon("fit", QStyle.SP_ArrowUp), "Fit to View", self)
         self.fit_action.setToolTip("Frame the whole cloud in the viewport")
@@ -3448,11 +3714,13 @@ class MainWindow(QMainWindow):
 
         file_menu = menu.addMenu("File")
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.open_clusters_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
         edit_menu = menu.addMenu("Edit")
         edit_menu.addAction(self.split_action)
+        edit_menu.addAction(self.dbscan_action)
 
         generate_menu = menu.addMenu("Generate")
         generate_menu.addAction(self.generate_synthetic_action)
@@ -3603,6 +3871,160 @@ class MainWindow(QMainWindow):
             self,
             "Split Complete",
             f"Saved {len(saved_paths)} PLY files to:\n{output_dir}",
+        )
+
+    def _current_cloud_display_name(self) -> str:
+        if self.current_cloud is None:
+            return "<no cloud>"
+        file_path = self.current_cloud.file_path.strip()
+        if file_path:
+            return file_path
+        return "<in-memory point cloud>"
+
+    def _default_dbscan_output_path(self) -> str:
+        if self.current_cloud is not None and self.current_cloud.file_path:
+            current_path = Path(self.current_cloud.file_path)
+            if current_path.suffix.lower() in {".txt", ".ply"}:
+                return str(current_path.with_name(f"{current_path.stem}_dbscan.yaml"))
+        return self._last_dbscan_output_path
+
+    def _cluster_boxes_from_result(self, result) -> Tuple[ClusterBoundingBoxData, ...]:
+        boxes: List[ClusterBoundingBoxData] = []
+        for cluster in getattr(result, "clusters", ()):
+            bbox = getattr(cluster, "bounding_box", None)
+            if bbox is None:
+                continue
+            min_corner = tuple(float(value) for value in getattr(bbox, "min_corner", (0.0, 0.0, 0.0)))
+            max_corner = tuple(float(value) for value in getattr(bbox, "max_corner", (0.0, 0.0, 0.0)))
+            if len(min_corner) != 3 or len(max_corner) != 3:
+                continue
+            boxes.append(
+                ClusterBoundingBoxData(
+                    cluster_id=int(getattr(cluster, "cluster_id", len(boxes))),
+                    point_count=int(getattr(cluster, "point_count", 0)),
+                    min_corner=min_corner,  # type: ignore[arg-type]
+                    max_corner=max_corner,  # type: ignore[arg-type]
+                )
+            )
+        return tuple(boxes)
+
+    def _apply_cluster_overlay(self, boxes: Sequence[ClusterBoundingBoxData], source_path: str) -> None:
+        self._cluster_boxes = tuple(boxes)
+        self._cluster_source_path = source_path
+        if source_path:
+            self._last_cluster_yaml_dir = str(Path(source_path).resolve().parent)
+        self.gl_widget.set_cluster_boxes(self._cluster_boxes)
+        self._update_status_bar()
+
+    def open_clusters_yaml_dialog(self) -> None:
+        start_dir = self._last_cluster_yaml_dir
+        if self.current_cloud is not None and self.current_cloud.file_path:
+            current_path = Path(self.current_cloud.file_path)
+            if current_path.suffix.lower() in {".txt", ".ply"}:
+                start_dir = str(current_path.parent)
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Cluster YAML",
+            start_dir,
+            "YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not path:
+            return
+
+        dbscan_module = self._get_dbscan_module()
+        if dbscan_module is None:
+            return
+
+        try:
+            result = dbscan_module.load_cluster_result(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Cluster Load Error",
+                f"Failed to load cluster YAML:\n{exc}",
+            )
+            return
+
+        self._apply_cluster_overlay(
+            self._cluster_boxes_from_result(result),
+            source_path=str(Path(path)),
+        )
+
+        cluster_count = len(self._cluster_boxes)
+        self.statusBar().showMessage(
+            f"Loaded cluster YAML: {path} | Clusters: {cluster_count}",
+            7000,
+        )
+        if self.current_cloud is None:
+            QMessageBox.information(
+                self,
+                "Clusters Loaded",
+                "Cluster YAML loaded. Open a point cloud to see the overlay.",
+            )
+
+    def run_dbscan_dialog(self) -> None:
+        if self.current_cloud is None:
+            QMessageBox.information(self, "No Cloud", "Open a point cloud first.")
+            return
+
+        dbscan_module = self._get_dbscan_module()
+        if dbscan_module is None:
+            return
+
+        dialog = DBSCANDialog(
+            cloud_name=self._current_cloud_display_name(),
+            default_epsilon=self._last_dbscan_epsilon,
+            default_min_pts=self._last_dbscan_min_pts,
+            default_output_path=self._default_dbscan_output_path(),
+            parent=self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        params = dialog.params()
+        self._last_dbscan_epsilon = params.epsilon
+        self._last_dbscan_min_pts = params.min_pts
+        self._last_dbscan_output_path = params.output_path
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            dbscan_module.run_dbscan_on_points(
+                self.current_cloud.points,
+                epsilon=params.epsilon,
+                min_pts=params.min_pts,
+                output_path=params.output_path,
+                input_path=self.current_cloud.file_path,
+            )
+            saved_result = dbscan_module.load_cluster_result(params.output_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "DBSCAN Error",
+                f"Failed to run DBSCAN:\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        saved_path = Path(params.output_path)
+        if saved_path.suffix.lower() not in {".yaml", ".yml"}:
+            saved_path = saved_path.with_suffix(".yaml")
+
+        self._apply_cluster_overlay(
+            self._cluster_boxes_from_result(saved_result),
+            source_path=str(saved_path),
+        )
+
+        cluster_count = len(self._cluster_boxes)
+        self.statusBar().showMessage(
+            f"DBSCAN complete | Clusters: {cluster_count} | YAML: {saved_path}",
+            7000,
+        )
+        QMessageBox.information(
+            self,
+            "DBSCAN Complete",
+            f"Clusters found: {cluster_count}\nSaved YAML:\n{saved_path}",
         )
 
     def fit_to_view(self) -> None:
@@ -3978,6 +4400,21 @@ class MainWindow(QMainWindow):
         self._synthetic_module = synthetic_module
         return self._synthetic_module
 
+    def _get_dbscan_module(self):
+        if self._dbscan_module is not None:
+            return self._dbscan_module
+        try:
+            import app_dbscan_alg as dbscan_module
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "DBSCAN Error",
+                f"Failed to import app_dbscan_alg.py:\n{exc}",
+            )
+            return None
+        self._dbscan_module = dbscan_module
+        return self._dbscan_module
+
     def _cloud_from_generated(
         self,
         generated_cloud: np.ndarray,
@@ -4046,8 +4483,13 @@ class MainWindow(QMainWindow):
         self._update_status_bar()
 
     def _update_status_bar(self) -> None:
+        cluster_text = f" | Clusters: {len(self._cluster_boxes)}" if self._cluster_boxes else ""
         if self.current_cloud is None:
-            self.statusBar().showMessage("No file loaded")
+            if self._cluster_source_path:
+                source_name = os.path.basename(self._cluster_source_path) or "<clusters>"
+                self.statusBar().showMessage(f"No file loaded{cluster_text} | Overlay: {source_name}")
+            else:
+                self.statusBar().showMessage("No file loaded")
             return
 
         file_name = os.path.basename(self.current_cloud.file_path) or "<unknown>"
@@ -4056,6 +4498,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"File: {file_name} | Points: {self.current_cloud.loaded_count:,} / "
             f"{self.current_cloud.original_count:,} | Color: {mode_label} | Nav: {nav_label}"
+            f"{cluster_text}"
         )
 
     def show_about(self) -> None:
@@ -4067,6 +4510,7 @@ class MainWindow(QMainWindow):
             "- TXT/PLY loading (ASCII and binary PLY)\n"
             "- OpenGL VBO rendering\n"
             "- Label and RGB color modes\n"
+            "- DBSCAN clustering with YAML bounding-box overlays\n"
             "- Orbit, pan, zoom camera controls\n"
             "- Optional game-style WASD + mouse navigation mode\n"
             "- Synthetic cloud generation with configurable parameters\n"
