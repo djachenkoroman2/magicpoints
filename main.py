@@ -55,10 +55,13 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QOpenGLWidget,
+    QPushButton,
     QScrollArea,
     QTabWidget,
     QSpinBox,
@@ -200,8 +203,148 @@ class PointCloudData:
         return self._label_color_cache
 
 
+def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> None:
+    """Export point cloud data to ASCII PLY, preserving optional RGB and label channels."""
+    points = np.ascontiguousarray(cloud.points, dtype=np.float32)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("Point cloud points must have shape (N, 3).")
+
+    rgb_uint8 = None
+    if cloud.rgb is not None and cloud.rgb.size > 0:
+        rgb = np.ascontiguousarray(cloud.rgb, dtype=np.float32)
+        rgb_uint8 = np.clip(np.round(rgb * 255.0), 0.0, 255.0).astype(np.uint8)
+
+    labels = None
+    if cloud.labels is not None and cloud.labels.size > 0:
+        labels = np.ascontiguousarray(cloud.labels, dtype=np.int32)
+
+    columns: List[np.ndarray] = [points[:, 0], points[:, 1], points[:, 2]]
+    fmt = ["%.6f", "%.6f", "%.6f"]
+    property_lines = [
+        "property float x",
+        "property float y",
+        "property float z",
+    ]
+
+    if rgb_uint8 is not None:
+        columns.extend([rgb_uint8[:, 0], rgb_uint8[:, 1], rgb_uint8[:, 2]])
+        fmt.extend(["%d", "%d", "%d"])
+        property_lines.extend(
+            [
+                "property uchar red",
+                "property uchar green",
+                "property uchar blue",
+            ]
+        )
+
+    if labels is not None:
+        columns.append(labels)
+        fmt.append("%d")
+        property_lines.append("property int label")
+
+    matrix = np.column_stack(columns)
+    with output_path.open("w", encoding="utf-8") as fh:
+        fh.write("ply\n")
+        fh.write("format ascii 1.0\n")
+        fh.write(f"element vertex {points.shape[0]}\n")
+        for line in property_lines:
+            fh.write(f"{line}\n")
+        fh.write("end_header\n")
+        np.savetxt(fh, matrix, fmt=fmt)
+
+
 class PointCloudLoaderError(Exception):
     pass
+
+
+class SplitByLabelDialog(QDialog):
+    def __init__(
+        self,
+        default_prefix: str,
+        default_directory: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Split Point Cloud by Label")
+        self.setModal(True)
+
+        self.prefix_edit = QLineEdit(self)
+        self.prefix_edit.setText(default_prefix)
+        self.prefix_edit.setPlaceholderText("file prefix")
+        self.prefix_edit.textChanged.connect(self._update_ok_button_state)
+
+        self.directory_edit = QLineEdit(self)
+        self.directory_edit.setText(default_directory)
+        self.directory_edit.textChanged.connect(self._update_ok_button_state)
+
+        self.browse_button = QPushButton("Browse...", self)
+        self.browse_button.clicked.connect(self._choose_directory)
+
+        directory_row = QHBoxLayout()
+        directory_row.addWidget(self.directory_edit)
+        directory_row.addWidget(self.browse_button)
+
+        form = QFormLayout()
+        form.addRow("File prefix:", self.prefix_edit)
+        form.addRow("Output directory:", directory_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+        self._update_ok_button_state()
+
+    def _choose_directory(self) -> None:
+        start_dir = self.output_directory() or str(Path.cwd())
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Directory",
+            start_dir,
+        )
+        if path:
+            self.directory_edit.setText(path)
+
+    def _update_ok_button_state(self) -> None:
+        if self.ok_button is None:
+            return
+        self.ok_button.setEnabled(bool(self.file_prefix()) and bool(self.output_directory()))
+
+    def file_prefix(self) -> str:
+        return self.prefix_edit.text().strip()
+
+    def output_directory(self) -> str:
+        return self.directory_edit.text().strip()
+
+    def accept(self) -> None:
+        prefix = self.file_prefix()
+        directory = self.output_directory()
+        if not prefix:
+            QMessageBox.warning(self, "Invalid Prefix", "Please enter a file prefix.")
+            return
+        if os.sep in prefix or (os.altsep and os.altsep in prefix):
+            QMessageBox.warning(
+                self,
+                "Invalid Prefix",
+                "The file prefix must not contain path separators.",
+            )
+            return
+        if not directory:
+            QMessageBox.warning(self, "Invalid Directory", "Please choose an output directory.")
+            return
+        if not Path(directory).is_dir():
+            QMessageBox.warning(
+                self,
+                "Invalid Directory",
+                "The selected output directory does not exist.",
+            )
+            return
+        super().accept()
 
 
 @dataclass
@@ -3199,6 +3342,8 @@ class MainWindow(QMainWindow):
         self._synthetic_module = None
         self._generated_cloud_raw: Optional[np.ndarray] = None
         self._last_generation_params = SyntheticGenerationParams()
+        self._last_split_prefix = "split"
+        self._last_split_dir = str(Path.cwd())
 
         self.setWindowTitle("MagicPoints")
         self.resize(1200, 800)
@@ -3225,6 +3370,15 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcut("Ctrl+O")
         self.open_action.setToolTip("Open TXT or PLY point cloud")
         self.open_action.triggered.connect(self.open_file_dialog)
+
+        self.split_action = QAction(
+            self._icon("split", QStyle.SP_FileDialogListView),
+            "Split...",
+            self,
+        )
+        self.split_action.setToolTip("Split labeled point cloud into one PLY file per class")
+        self.split_action.setEnabled(False)
+        self.split_action.triggered.connect(self.split_point_cloud_by_label)
 
         self.fit_action = QAction(self._icon("fit", QStyle.SP_ArrowUp), "Fit to View", self)
         self.fit_action.setToolTip("Frame the whole cloud in the viewport")
@@ -3297,6 +3451,9 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
+        edit_menu = menu.addMenu("Edit")
+        edit_menu.addAction(self.split_action)
+
         generate_menu = menu.addMenu("Generate")
         generate_menu.addAction(self.generate_synthetic_action)
         generate_menu.addAction(self.save_generated_ply_action)
@@ -3330,6 +3487,7 @@ class MainWindow(QMainWindow):
             f"QToolButton {{ min-width: {icon_px + 10}px; min-height: {icon_px + 10}px; }}"
         )
         toolbar.addAction(self.open_action)
+        toolbar.addAction(self.split_action)
         toolbar.addAction(self.fit_action)
         toolbar.addAction(self.reset_action)
         toolbar.addAction(self.view_top_action)
@@ -3375,6 +3533,77 @@ class MainWindow(QMainWindow):
                 f"Loaded points: {cloud.loaded_count:,}\n"
                 f"Sampling limit: {self.max_points:,}",
             )
+
+    def _default_split_prefix(self) -> str:
+        if self.current_cloud is not None and self.current_cloud.file_path:
+            stem = Path(self.current_cloud.file_path).stem.strip()
+            if stem:
+                return re.sub(r"[\\\\/:*?\"<>|]+", "_", stem)
+        return self._last_split_prefix or "split"
+
+    def split_point_cloud_by_label(self) -> None:
+        if self.current_cloud is None:
+            QMessageBox.information(self, "No Cloud", "Open a point cloud first.")
+            return
+        if not self.current_cloud.has_labels or self.current_cloud.labels is None:
+            QMessageBox.information(
+                self,
+                "No Labels",
+                "The current point cloud does not contain a label field.",
+            )
+            return
+
+        dialog = SplitByLabelDialog(
+            default_prefix=self._default_split_prefix(),
+            default_directory=self._last_split_dir,
+            parent=self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        prefix = dialog.file_prefix()
+        output_dir = Path(dialog.output_directory())
+        self._last_split_prefix = prefix
+        self._last_split_dir = str(output_dir)
+
+        labels = self.current_cloud.labels
+        unique_labels = np.unique(labels)
+        if unique_labels.size == 0:
+            QMessageBox.information(
+                self,
+                "No Labels",
+                "The current point cloud does not contain any label values.",
+            )
+            return
+
+        saved_paths: List[Path] = []
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for label in unique_labels:
+                indices = np.flatnonzero(labels == label)
+                subset = self.current_cloud.subset(indices)
+                out_path = output_dir / f"{prefix}_{int(label)}.ply"
+                export_point_cloud_data_to_ply(subset, out_path)
+                saved_paths.append(out_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Split Error",
+                f"Failed to split point cloud into class files:\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.statusBar().showMessage(
+            f"Saved {len(saved_paths)} class PLY files to {output_dir}",
+            7000,
+        )
+        QMessageBox.information(
+            self,
+            "Split Complete",
+            f"Saved {len(saved_paths)} PLY files to:\n{output_dir}",
+        )
 
     def fit_to_view(self) -> None:
         self.gl_widget.fit_to_view()
@@ -3731,6 +3960,7 @@ class MainWindow(QMainWindow):
             self.gl_widget.set_color_mode("neutral")
 
         self.toggle_rgb_action.setEnabled(cloud.has_rgb)
+        self.split_action.setEnabled(cloud.has_labels)
         self._update_status_bar()
 
     def _get_synthetic_module(self):
