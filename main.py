@@ -674,6 +674,30 @@ FALLBACK_SYNTHETIC_CLASS_NAMES: Dict[int, str] = {
     7: "Artifacts",
 }
 FALLBACK_CLASS_PERCENTAGES: Tuple[float, ...] = (38.0, 13.0, 16.0, 14.0, 10.0, 4.0, 3.0, 2.0)
+FALLBACK_ARTIFICIAL_SURFACE_TYPES: Tuple[str, ...] = (
+    "road_network",
+    "sidewalk",
+    "parking_lot",
+    "building_front_area",
+    "industrial_concrete_pad",
+    "platform",
+)
+FALLBACK_ARTIFICIAL_SURFACE_TYPE_NAMES: Dict[str, str] = {
+    "road_network": "Road network",
+    "sidewalk": "Sidewalks along buildings",
+    "parking_lot": "Parking lots",
+    "building_front_area": "Areas in front of buildings",
+    "industrial_concrete_pad": "Industrial concrete pads",
+    "platform": "Platforms / station aprons",
+}
+FALLBACK_ARTIFICIAL_SURFACE_TYPE_PERCENTAGES: Tuple[float, ...] = (
+    30.0,
+    22.0,
+    16.0,
+    10.0,
+    12.0,
+    10.0,
+)
 FALLBACK_VEHICLE_TYPES: Tuple[str, ...] = ("car", "truck", "bus")
 FALLBACK_VEHICLE_TYPE_NAMES: Dict[str, str] = {
     "car": "Passenger car",
@@ -833,6 +857,12 @@ class SyntheticGenerationParams:
     randomize_object_counts: bool = True
     custom_class_distribution: bool = False
     class_percentages: Tuple[float, ...] = FALLBACK_CLASS_PERCENTAGES
+    custom_artificial_surface_count: bool = False
+    artificial_surface_count: int = 9
+    custom_artificial_surface_type_distribution: bool = False
+    artificial_surface_type_percentages: Tuple[float, ...] = (
+        FALLBACK_ARTIFICIAL_SURFACE_TYPE_PERCENTAGES
+    )
     custom_building_count: bool = False
     building_count: int = 14
     custom_building_roof_type_distribution: bool = False
@@ -878,6 +908,8 @@ class SyntheticGenerationDialog(QDialog):
         default_params: Optional[SyntheticGenerationParams] = None,
         class_names: Optional[Dict[int, str]] = None,
         default_class_percentages: Optional[Sequence[float]] = None,
+        artificial_surface_type_names: Optional[Dict[str, str]] = None,
+        default_artificial_surface_type_percentages: Optional[Sequence[float]] = None,
         building_roof_type_names: Optional[Dict[str, str]] = None,
         default_building_roof_type_percentages: Optional[Sequence[float]] = None,
         building_defaults: Optional[Dict[str, int | bool]] = None,
@@ -909,6 +941,20 @@ class SyntheticGenerationDialog(QDialog):
             values=params.class_percentages,
             class_count=len(self._class_ids),
             fallback=fallback_percentages,
+        )
+        self._artificial_surface_type_names = self._normalize_artificial_surface_type_names(
+            artificial_surface_type_names
+        )
+        self._artificial_surface_types = list(FALLBACK_ARTIFICIAL_SURFACE_TYPES)
+        fallback_artificial_surface_percentages = self._normalize_percentages(
+            values=default_artificial_surface_type_percentages,
+            class_count=len(self._artificial_surface_types),
+            fallback=FALLBACK_ARTIFICIAL_SURFACE_TYPE_PERCENTAGES,
+        )
+        initial_artificial_surface_percentages = self._normalize_percentages(
+            values=params.artificial_surface_type_percentages,
+            class_count=len(self._artificial_surface_types),
+            fallback=fallback_artificial_surface_percentages,
         )
         self._building_roof_type_names = self._normalize_building_roof_type_names(
             building_roof_type_names
@@ -1095,6 +1141,45 @@ class SyntheticGenerationDialog(QDialog):
             self.class_percentage_spins[class_id] = spin
 
         self.class_distribution_sum_label = QLabel(self)
+        self.custom_artificial_surface_count_check = QCheckBox(
+            "Use custom artificial surface count",
+            self,
+        )
+        self.custom_artificial_surface_count_check.setChecked(
+            bool(params.custom_artificial_surface_count)
+        )
+        self.custom_artificial_surface_count_check.toggled.connect(
+            self._update_artificial_surface_settings_state
+        )
+
+        self.artificial_surface_count_spin = QSpinBox(self)
+        self.artificial_surface_count_spin.setRange(1, 1_000_000)
+        self.artificial_surface_count_spin.setSingleStep(1)
+        self.artificial_surface_count_spin.setValue(max(1, int(params.artificial_surface_count)))
+
+        self.custom_artificial_surface_type_check = QCheckBox(
+            "Use custom artificial surface type distribution (%)",
+            self,
+        )
+        self.custom_artificial_surface_type_check.setChecked(
+            bool(params.custom_artificial_surface_type_distribution)
+        )
+        self.custom_artificial_surface_type_check.toggled.connect(
+            self._update_artificial_surface_settings_state
+        )
+
+        self.artificial_surface_type_percentage_spins: Dict[str, QDoubleSpinBox] = {}
+        for idx, surface_type in enumerate(self._artificial_surface_types):
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" %")
+            spin.setValue(float(initial_artificial_surface_percentages[idx]))
+            spin.valueChanged.connect(self._update_artificial_surface_distribution_summary)
+            self.artificial_surface_type_percentage_spins[surface_type] = spin
+
+        self.artificial_surface_distribution_sum_label = QLabel(self)
         self.custom_building_count_check = QCheckBox("Use custom building count", self)
         self.custom_building_count_check.setChecked(bool(params.custom_building_count))
         self.custom_building_count_check.toggled.connect(self._update_building_state)
@@ -1346,6 +1431,23 @@ class SyntheticGenerationDialog(QDialog):
             )
         form_general.addRow("Class sum:", self.class_distribution_sum_label)
 
+        form_artificial_surface = QFormLayout()
+        form_artificial_surface.addRow("", self.custom_artificial_surface_count_check)
+        form_artificial_surface.addRow(
+            "Artificial surface objects:",
+            self.artificial_surface_count_spin,
+        )
+        form_artificial_surface.addRow("", self.custom_artificial_surface_type_check)
+        for surface_type in self._artificial_surface_types:
+            form_artificial_surface.addRow(
+                f"{self._artificial_surface_type_names[surface_type]}:",
+                self.artificial_surface_type_percentage_spins[surface_type],
+            )
+        form_artificial_surface.addRow(
+            "Type sum:",
+            self.artificial_surface_distribution_sum_label,
+        )
+
         form_building = QFormLayout()
         form_building.addRow("", self.custom_building_count_check)
         form_building.addRow("Building instances:", self.building_count_spin)
@@ -1424,6 +1526,12 @@ class SyntheticGenerationDialog(QDialog):
         general_layout.addStretch(1)
         tabs.addTab(general_tab, "General")
 
+        artificial_surface_tab = QWidget(self)
+        artificial_surface_layout = QVBoxLayout(artificial_surface_tab)
+        artificial_surface_layout.addLayout(form_artificial_surface)
+        artificial_surface_layout.addStretch(1)
+        tabs.addTab(artificial_surface_tab, "Artificial Surface")
+
         building_tab = QWidget(self)
         building_layout = QVBoxLayout(building_tab)
         building_layout.addLayout(form_building)
@@ -1491,12 +1599,14 @@ class SyntheticGenerationDialog(QDialog):
         self.setLayout(layout)
 
         self._update_class_distribution_state()
+        self._update_artificial_surface_settings_state()
         self._update_building_state()
         self._update_structure_settings_state()
         self._update_high_vegetation_state()
         self._update_vehicle_settings_state()
         self._update_low_vegetation_state()
         self._update_class_distribution_summary()
+        self._update_artificial_surface_distribution_summary()
         self._update_building_distribution_summary()
         self._update_structure_distribution_summary()
         self._update_tree_crown_distribution_summary()
@@ -1532,6 +1642,11 @@ class SyntheticGenerationDialog(QDialog):
             class_count=len(self._class_ids),
             fallback=FALLBACK_CLASS_PERCENTAGES,
         )
+        artificial_surface_percentages = self._normalize_percentages(
+            values=params.artificial_surface_type_percentages,
+            class_count=len(self._artificial_surface_types),
+            fallback=FALLBACK_ARTIFICIAL_SURFACE_TYPE_PERCENTAGES,
+        )
         building_roof_percentages = self._normalize_percentages(
             values=params.building_roof_type_percentages,
             class_count=len(self._building_roof_types),
@@ -1565,6 +1680,24 @@ class SyntheticGenerationDialog(QDialog):
                 self.class_percentage_spins[class_id],
                 float(class_percentages[index]),
                 f"class_percentages[{class_id}]",
+            )
+
+        self.custom_artificial_surface_count_check.setChecked(
+            bool(params.custom_artificial_surface_count)
+        )
+        _set_spin_value(
+            self.artificial_surface_count_spin,
+            int(params.artificial_surface_count),
+            "artificial_surface_count",
+        )
+        self.custom_artificial_surface_type_check.setChecked(
+            bool(params.custom_artificial_surface_type_distribution)
+        )
+        for index, surface_type in enumerate(self._artificial_surface_types):
+            _set_spin_value(
+                self.artificial_surface_type_percentage_spins[surface_type],
+                float(artificial_surface_percentages[index]),
+                f"artificial_surface_type_percentages[{surface_type}]",
             )
 
         self.custom_building_count_check.setChecked(bool(params.custom_building_count))
@@ -1675,12 +1808,14 @@ class SyntheticGenerationDialog(QDialog):
         )
 
         self._update_class_distribution_state()
+        self._update_artificial_surface_settings_state()
         self._update_building_state()
         self._update_structure_settings_state()
         self._update_high_vegetation_state()
         self._update_vehicle_settings_state()
         self._update_low_vegetation_state()
         self._update_class_distribution_summary()
+        self._update_artificial_surface_distribution_summary()
         self._update_building_distribution_summary()
         self._update_structure_distribution_summary()
         self._update_tree_crown_distribution_summary()
@@ -1691,6 +1826,10 @@ class SyntheticGenerationDialog(QDialog):
         if not self._is_class_distribution_valid():
             errors.append(
                 "When custom class distribution is enabled, class percentages must sum to 100%."
+            )
+        if not self._is_artificial_surface_distribution_valid():
+            errors.append(
+                "When custom artificial surface type distribution is enabled, percentages must sum to 100%."
             )
         if not self._is_building_roof_distribution_valid():
             errors.append(
@@ -1799,6 +1938,23 @@ class SyntheticGenerationDialog(QDialog):
         if not normalized:
             return dict(FALLBACK_SYNTHETIC_CLASS_NAMES)
         return {class_id: normalized[class_id] for class_id in sorted(normalized)}
+
+    @staticmethod
+    def _normalize_artificial_surface_type_names(
+        artificial_surface_type_names: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        source = (
+            artificial_surface_type_names
+            if isinstance(artificial_surface_type_names, dict)
+            else {}
+        )
+        for surface_type in FALLBACK_ARTIFICIAL_SURFACE_TYPES:
+            label = source.get(surface_type)
+            if label is None:
+                label = FALLBACK_ARTIFICIAL_SURFACE_TYPE_NAMES[surface_type]
+            out[surface_type] = str(label)
+        return out
 
     @staticmethod
     def _normalize_building_roof_type_names(
@@ -1968,6 +2124,12 @@ class SyntheticGenerationDialog(QDialog):
             for class_id in self._class_ids
         )
 
+    def _current_artificial_surface_type_percentages(self) -> Tuple[float, ...]:
+        return tuple(
+            float(self.artificial_surface_type_percentage_spins[surface_type].value())
+            for surface_type in self._artificial_surface_types
+        )
+
     def _current_building_roof_type_percentages(self) -> Tuple[float, ...]:
         return tuple(
             float(self.building_roof_type_percentage_spins[roof_type].value())
@@ -1997,6 +2159,18 @@ class SyntheticGenerationDialog(QDialog):
             return True
 
         percentages = np.asarray(self._current_class_percentages(), dtype=np.float64)
+        total = float(percentages.sum())
+        has_positive = bool(np.any(percentages > 0.0))
+        return has_positive and abs(total - 100.0) <= 0.01
+
+    def _is_artificial_surface_distribution_valid(self) -> bool:
+        if not self.custom_artificial_surface_type_check.isChecked():
+            return True
+
+        percentages = np.asarray(
+            self._current_artificial_surface_type_percentages(),
+            dtype=np.float64,
+        )
         total = float(percentages.sum())
         has_positive = bool(np.any(percentages > 0.0))
         return has_positive and abs(total - 100.0) <= 0.01
@@ -2065,6 +2239,16 @@ class SyntheticGenerationDialog(QDialog):
         for spin in self.class_percentage_spins.values():
             spin.setEnabled(enabled)
         self._update_class_distribution_summary()
+
+    def _update_artificial_surface_settings_state(self) -> None:
+        self.artificial_surface_count_spin.setEnabled(
+            bool(self.custom_artificial_surface_count_check.isChecked())
+        )
+        is_custom_distribution = bool(self.custom_artificial_surface_type_check.isChecked())
+        for spin in self.artificial_surface_type_percentage_spins.values():
+            spin.setEnabled(is_custom_distribution)
+        self._update_artificial_surface_distribution_summary()
+        self._update_ok_button_state()
 
     def _update_building_state(self) -> None:
         self.building_count_spin.setEnabled(bool(self.custom_building_count_check.isChecked()))
@@ -2164,6 +2348,28 @@ class SyntheticGenerationDialog(QDialog):
         self.class_distribution_sum_label.setStyleSheet(f"color: {color};")
         self._update_ok_button_state()
 
+    def _update_artificial_surface_distribution_summary(self) -> None:
+        total = float(sum(self._current_artificial_surface_type_percentages()))
+        is_custom = bool(self.custom_artificial_surface_type_check.isChecked())
+        is_valid = self._is_artificial_surface_distribution_valid()
+
+        if not is_custom:
+            text = f"{total:.2f}% (custom disabled, random distribution will be used)"
+            color = "#666666"
+        elif is_valid:
+            text = f"{total:.2f}% (valid)"
+            color = "#1f7a1f"
+        elif total <= 0.0:
+            text = f"{total:.2f}% (invalid: at least one type must be > 0)"
+            color = "#b00020"
+        else:
+            text = f"{total:.2f}% (invalid: must equal 100.00%)"
+            color = "#b00020"
+
+        self.artificial_surface_distribution_sum_label.setText(text)
+        self.artificial_surface_distribution_sum_label.setStyleSheet(f"color: {color};")
+        self._update_ok_button_state()
+
     def _update_building_distribution_summary(self) -> None:
         total = float(sum(self._current_building_roof_type_percentages()))
         is_custom = bool(self.custom_building_roof_type_check.isChecked())
@@ -2257,6 +2463,7 @@ class SyntheticGenerationDialog(QDialog):
             return
         self.ok_button.setEnabled(
             self._is_class_distribution_valid()
+            and self._is_artificial_surface_distribution_valid()
             and self._is_building_roof_distribution_valid()
             and self._is_structure_distribution_valid()
             and self._is_tree_crown_distribution_valid()
@@ -2287,6 +2494,16 @@ class SyntheticGenerationDialog(QDialog):
             randomize_object_counts=bool(self.random_counts_check.isChecked()),
             custom_class_distribution=bool(self.custom_distribution_check.isChecked()),
             class_percentages=self._current_class_percentages(),
+            custom_artificial_surface_count=bool(
+                self.custom_artificial_surface_count_check.isChecked()
+            ),
+            artificial_surface_count=int(self.artificial_surface_count_spin.value()),
+            custom_artificial_surface_type_distribution=bool(
+                self.custom_artificial_surface_type_check.isChecked()
+            ),
+            artificial_surface_type_percentages=(
+                self._current_artificial_surface_type_percentages()
+            ),
             custom_building_count=bool(self.custom_building_count_check.isChecked()),
             building_count=int(self.building_count_spin.value()),
             custom_building_roof_type_distribution=bool(
@@ -3222,6 +3439,27 @@ class MainWindow(QMainWindow):
                     float(default_class_ratios[class_id]) * 100.0
                     for class_id in sorted(default_class_ratios)
                 )
+        artificial_surface_type_names = getattr(
+            synthetic_module,
+            "ARTIFICIAL_SURFACE_TYPE_NAMES",
+            None,
+        )
+        default_artificial_surface_type_percentages = getattr(
+            synthetic_module,
+            "DEFAULT_ARTIFICIAL_SURFACE_TYPE_PERCENTAGES",
+            None,
+        )
+        if default_artificial_surface_type_percentages is None:
+            default_artificial_surface_type_ratios = getattr(
+                synthetic_module,
+                "DEFAULT_ARTIFICIAL_SURFACE_TYPE_RATIOS",
+                None,
+            )
+            if isinstance(default_artificial_surface_type_ratios, dict):
+                default_artificial_surface_type_percentages = tuple(
+                    float(default_artificial_surface_type_ratios.get(key, 0.0)) * 100.0
+                    for key in FALLBACK_ARTIFICIAL_SURFACE_TYPES
+                )
         building_roof_type_names = getattr(synthetic_module, "BUILDING_ROOF_TYPE_NAMES", None)
         default_building_roof_type_percentages = getattr(
             synthetic_module,
@@ -3299,6 +3537,14 @@ class MainWindow(QMainWindow):
             default_params=self._last_generation_params,
             class_names=class_names if isinstance(class_names, dict) else None,
             default_class_percentages=default_class_percentages,
+            artificial_surface_type_names=(
+                artificial_surface_type_names
+                if isinstance(artificial_surface_type_names, dict)
+                else None
+            ),
+            default_artificial_surface_type_percentages=(
+                default_artificial_surface_type_percentages
+            ),
             building_roof_type_names=(
                 building_roof_type_names if isinstance(building_roof_type_names, dict) else None
             ),
@@ -3335,6 +3581,16 @@ class MainWindow(QMainWindow):
                 class_percentages=(
                     params.class_percentages
                     if params.custom_class_distribution
+                    else None
+                ),
+                artificial_surface_count=(
+                    params.artificial_surface_count
+                    if params.custom_artificial_surface_count
+                    else None
+                ),
+                artificial_surface_type_percentages=(
+                    params.artificial_surface_type_percentages
+                    if params.custom_artificial_surface_type_distribution
                     else None
                 ),
                 building_count=(

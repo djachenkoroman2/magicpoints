@@ -65,6 +65,35 @@ DEFAULT_CLASS_PERCENTAGES: Tuple[float, ...] = tuple(
     DEFAULT_CLASS_RATIOS[class_id] * 100.0 for class_id in CLASS_IDS
 )
 
+ARTIFICIAL_SURFACE_TYPES: Tuple[str, ...] = (
+    "road_network",
+    "sidewalk",
+    "parking_lot",
+    "building_front_area",
+    "industrial_concrete_pad",
+    "platform",
+)
+ARTIFICIAL_SURFACE_TYPE_NAMES: Dict[str, str] = {
+    "road_network": "Road network",
+    "sidewalk": "Sidewalks along buildings",
+    "parking_lot": "Parking lots",
+    "building_front_area": "Areas in front of buildings",
+    "industrial_concrete_pad": "Industrial concrete pads",
+    "platform": "Platforms / station aprons",
+}
+DEFAULT_ARTIFICIAL_SURFACE_TYPE_RATIOS: Dict[str, float] = {
+    "road_network": 0.30,
+    "sidewalk": 0.22,
+    "parking_lot": 0.16,
+    "building_front_area": 0.10,
+    "industrial_concrete_pad": 0.12,
+    "platform": 0.10,
+}
+DEFAULT_ARTIFICIAL_SURFACE_TYPE_PERCENTAGES: Tuple[float, ...] = tuple(
+    DEFAULT_ARTIFICIAL_SURFACE_TYPE_RATIOS[surface_type] * 100.0
+    for surface_type in ARTIFICIAL_SURFACE_TYPES
+)
+
 VEHICLE_TYPES: Tuple[str, ...] = ("car", "truck", "bus")
 VEHICLE_TYPE_NAMES: Dict[str, str] = {
     "car": "Passenger car",
@@ -257,6 +286,12 @@ def default_generation_config() -> Dict[str, Any]:
         "randomize_object_counts": True,
         "custom_class_distribution": False,
         "class_percentages": tuple(DEFAULT_CLASS_PERCENTAGES),
+        "custom_artificial_surface_count": False,
+        "artificial_surface_count": 9,
+        "custom_artificial_surface_type_distribution": False,
+        "artificial_surface_type_percentages": tuple(
+            DEFAULT_ARTIFICIAL_SURFACE_TYPE_PERCENTAGES
+        ),
         "custom_building_count": False,
         "building_count": 14,
         "custom_building_roof_type_distribution": False,
@@ -493,6 +528,39 @@ def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         key_parser=_parse_class_id_key,
     )
 
+    normalized["custom_artificial_surface_count"] = _coerce_bool(
+        config.get(
+            "custom_artificial_surface_count",
+            defaults["custom_artificial_surface_count"],
+        ),
+        "custom_artificial_surface_count",
+    )
+    normalized["artificial_surface_count"] = _coerce_int(
+        config.get("artificial_surface_count", defaults["artificial_surface_count"]),
+        "artificial_surface_count",
+        min_value=1,
+    )
+    normalized["custom_artificial_surface_type_distribution"] = _coerce_bool(
+        config.get(
+            "custom_artificial_surface_type_distribution",
+            defaults["custom_artificial_surface_type_distribution"],
+        ),
+        "custom_artificial_surface_type_distribution",
+    )
+    normalized["artificial_surface_type_percentages"] = _coerce_percentage_values(
+        config.get(
+            "artificial_surface_type_percentages",
+            defaults["artificial_surface_type_percentages"],
+        ),
+        "artificial_surface_type_percentages",
+        ordered_keys=ARTIFICIAL_SURFACE_TYPES,
+        key_parser=lambda raw_key, field_name: _parse_choice_key(
+            raw_key,
+            field_name,
+            ARTIFICIAL_SURFACE_TYPES,
+        ),
+    )
+
     normalized["custom_building_count"] = _coerce_bool(
         config.get("custom_building_count", defaults["custom_building_count"]),
         "custom_building_count",
@@ -700,6 +768,11 @@ def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
             normalized["class_percentages"],
             "class_percentages",
         )
+    if normalized["custom_artificial_surface_type_distribution"]:
+        _validate_enabled_percentage_distribution(
+            normalized["artificial_surface_type_percentages"],
+            "artificial_surface_type_percentages",
+        )
     if normalized["custom_building_roof_type_distribution"]:
         _validate_enabled_percentage_distribution(
             normalized["building_roof_type_percentages"],
@@ -744,6 +817,11 @@ def generation_config_to_yaml_data(config: Mapping[str, Any]) -> Dict[str, Any]:
             yaml_data[key] = {
                 str(class_id): float(value[index])
                 for index, class_id in enumerate(CLASS_IDS)
+            }
+        elif key == "artificial_surface_type_percentages":
+            yaml_data[key] = {
+                surface_type: float(value[index])
+                for index, surface_type in enumerate(ARTIFICIAL_SURFACE_TYPES)
             }
         elif key == "building_roof_type_percentages":
             yaml_data[key] = {
@@ -813,6 +891,16 @@ def generation_config_to_pipeline_kwargs(config: Mapping[str, Any]) -> Dict[str,
         "class_percentages": (
             validated["class_percentages"]
             if validated["custom_class_distribution"]
+            else None
+        ),
+        "artificial_surface_count": (
+            int(validated["artificial_surface_count"])
+            if validated["custom_artificial_surface_count"]
+            else None
+        ),
+        "artificial_surface_type_percentages": (
+            validated["artificial_surface_type_percentages"]
+            if validated["custom_artificial_surface_type_distribution"]
             else None
         ),
         "tree_count": int(validated["tree_count"]) if validated["custom_tree_count"] else None,
@@ -919,6 +1007,58 @@ def _class_ratios_from_percentages(
 
     ratios = weights / weights.sum()
     return {class_id: float(ratios[idx]) for idx, class_id in enumerate(CLASS_IDS)}
+
+
+def _artificial_surface_type_ratios_from_percentages(
+    artificial_surface_type_percentages: Sequence[float] | Dict[str, float] | None,
+) -> Dict[str, float]:
+    """
+    Build normalized artificial surface type ratios from optional percentages.
+    Supports sequence in ARTIFICIAL_SURFACE_TYPES order or mapping by type keys.
+    """
+    if artificial_surface_type_percentages is None:
+        return dict(DEFAULT_ARTIFICIAL_SURFACE_TYPE_RATIOS)
+
+    if isinstance(artificial_surface_type_percentages, dict):
+        normalized: Dict[str, float] = {}
+        for key, value in artificial_surface_type_percentages.items():
+            surface_type = str(key).strip().lower()
+            if surface_type not in ARTIFICIAL_SURFACE_TYPES:
+                raise ValueError(
+                    "Unknown artificial surface type key "
+                    f"`{key}` in `artificial_surface_type_percentages`. "
+                    f"Supported keys are {list(ARTIFICIAL_SURFACE_TYPES)}."
+                )
+            normalized[surface_type] = float(value)
+        values = [
+            float(normalized.get(surface_type, 0.0))
+            for surface_type in ARTIFICIAL_SURFACE_TYPES
+        ]
+    else:
+        values = [float(value) for value in artificial_surface_type_percentages]
+        if len(values) != len(ARTIFICIAL_SURFACE_TYPES):
+            raise ValueError(
+                "`artificial_surface_type_percentages` must contain exactly "
+                f"{len(ARTIFICIAL_SURFACE_TYPES)} values "
+                f"(for artificial surface types {list(ARTIFICIAL_SURFACE_TYPES)}), "
+                f"got {len(values)}."
+            )
+
+    weights = np.array(values, dtype=np.float64)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError(
+            "`artificial_surface_type_percentages` must contain only finite numbers."
+        )
+    if np.any(weights < 0.0):
+        raise ValueError("`artificial_surface_type_percentages` must be non-negative.")
+    if np.isclose(weights.sum(), 0.0):
+        raise ValueError("At least one artificial surface type percentage must be > 0.")
+
+    weights = weights / weights.sum()
+    return {
+        surface_type: float(weights[idx])
+        for idx, surface_type in enumerate(ARTIFICIAL_SURFACE_TYPES)
+    }
 
 
 def _vehicle_type_ratios_from_percentages(
@@ -1312,21 +1452,32 @@ def _rect_overlap_ratio(rect_a: Rect, rect_b: Rect) -> float:
     return inter_area / min_area
 
 
-def generate_terrain(
-    area_size: Tuple[float, float] = (240.0, 220.0),
-    n_points: int = 40_000,
-    seed: int = 42,
-    terrain_relief: float = 1.0,
-) -> Tuple[np.ndarray, Callable[[np.ndarray, np.ndarray], np.ndarray], List[Dict[str, object]]]:
-    """
-    Generate natural terrain (class 0) and return:
-      - terrain points (N, 4)
-      - terrain height function z=f(x,y)
-      - artificial zones metadata for roads/plazas
-    `terrain_relief` controls elevation amplitude in [0,1]:
-      0 -> almost flat, 1 -> mountainous.
-    """
-    rng = np.random.default_rng(seed)
+def _sample_scene_artificial_surface_type_ratios(
+    rng: np.random.Generator,
+) -> Dict[str, float]:
+    """Sample scene-specific artificial surface ratios when no custom distribution is provided."""
+    alpha = np.array(
+        [
+            max(
+                0.55,
+                14.0 * DEFAULT_ARTIFICIAL_SURFACE_TYPE_RATIOS[surface_type],
+            )
+            for surface_type in ARTIFICIAL_SURFACE_TYPES
+        ],
+        dtype=np.float64,
+    )
+    weights = rng.dirichlet(alpha)
+    return {
+        surface_type: float(weights[index])
+        for index, surface_type in enumerate(ARTIFICIAL_SURFACE_TYPES)
+    }
+
+
+def _build_terrain_height_function(
+    area_size: Tuple[float, float],
+    terrain_relief: float,
+) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    """Create deterministic terrain elevation function for the requested scene size."""
     area_w, area_h = area_size
     scale = max(area_w, area_h)
     relief = float(terrain_relief)
@@ -1336,7 +1487,6 @@ def generate_terrain(
         x_arr = np.asarray(x, dtype=np.float64)
         y_arr = np.asarray(y, dtype=np.float64)
 
-        # Multi-frequency sinusoidal field + Gaussian hills/valleys.
         z = 2.2 * np.sin(2.0 * np.pi * x_arr / (0.75 * area_w))
         z += 1.5 * np.cos(2.0 * np.pi * y_arr / (0.60 * area_h))
         z += 1.1 * np.sin(2.0 * np.pi * (x_arr + y_arr) / (0.92 * scale))
@@ -1356,85 +1506,331 @@ def generate_terrain(
         )
         return relief * (z + hill + valley)
 
-    # Random artificial zones: roads + plazas.
-    artificial_zones: List[Dict[str, object]] = []
+    return terrain_fn
+
+
+def _clamp_rect_to_area(rect: Rect, area_size: Tuple[float, float]) -> Rect:
+    """Clamp rectangle size and center so it stays inside the scene bounds."""
+    cx, cy, sx, sy = rect
+    area_w, area_h = area_size
+    sx_clamped = min(max(0.8, float(sx)), max(0.8, 0.94 * area_w))
+    sy_clamped = min(max(0.8, float(sy)), max(0.8, 0.94 * area_h))
+    min_cx = -0.5 * area_w + 0.5 * sx_clamped
+    max_cx = 0.5 * area_w - 0.5 * sx_clamped
+    min_cy = -0.5 * area_h + 0.5 * sy_clamped
+    max_cy = 0.5 * area_h - 0.5 * sy_clamped
+    cx_clamped = float(np.clip(cx, min_cx, max_cx))
+    cy_clamped = float(np.clip(cy, min_cy, max_cy))
+    return (cx_clamped, cy_clamped, sx_clamped, sy_clamped)
+
+
+def _surface_vehicle_allowed(surface_type: str) -> bool:
+    """Whether the surface type is a plausible location for parked or moving vehicles."""
+    return surface_type in {
+        "road_network",
+        "parking_lot",
+        "building_front_area",
+        "industrial_concrete_pad",
+    }
+
+
+def _surface_height_offset(
+    rng: np.random.Generator,
+    surface_type: str,
+) -> float:
+    """Type-specific elevation offset above terrain for flat artificial surfaces."""
+    if surface_type == "platform":
+        return float(rng.uniform(0.18, 0.60))
+    if surface_type == "industrial_concrete_pad":
+        return float(rng.uniform(0.07, 0.18))
+    if surface_type == "building_front_area":
+        return float(rng.uniform(0.05, 0.15))
+    if surface_type == "sidewalk":
+        return float(rng.uniform(0.05, 0.12))
+    return float(rng.uniform(0.03, 0.11))
+
+
+def _make_surface_zone(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    name: str,
+    surface_type: str,
+    rect: Rect,
+) -> Dict[str, object]:
+    """Build normalized artificial surface zone metadata."""
+    cx, cy, _, _ = rect
+    z0 = float(
+        terrain_fn(np.array([cx], dtype=np.float64), np.array([cy], dtype=np.float64))[0]
+        + _surface_height_offset(rng, surface_type)
+    )
+    return {
+        "name": name,
+        "kind": surface_type,
+        "surface_type": surface_type,
+        "rect": rect,
+        "z0": z0,
+        "vehicle_allowed": _surface_vehicle_allowed(surface_type),
+    }
+
+
+def _zone_overlap_is_ok(
+    candidate: Rect,
+    surface_type: str,
+    existing_zones: Sequence[Dict[str, object]],
+) -> bool:
+    """Check whether the candidate surface can coexist with already placed zones."""
+    for zone in existing_zones:
+        other_rect = zone["rect"]  # type: ignore[index]
+        overlap = _rect_overlap_ratio(candidate, other_rect)
+        other_type = str(zone.get("surface_type", zone.get("kind", ""))).strip().lower()
+
+        if surface_type == "road_network" and other_type == "road_network":
+            if overlap >= 0.58:
+                return False
+            continue
+        if surface_type in {"sidewalk", "building_front_area"} and other_type in {
+            "sidewalk",
+            "building_front_area",
+        }:
+            if overlap >= 0.34:
+                return False
+            continue
+        if overlap >= 0.22:
+            return False
+    return True
+
+
+def _sample_detached_surface_rect(
+    rng: np.random.Generator,
+    area_size: Tuple[float, float],
+    surface_type: str,
+    existing_zones: Sequence[Dict[str, object]],
+) -> Rect:
+    """Sample a free-standing artificial surface rectangle."""
+    area_w, area_h = area_size
     min_side = min(area_w, area_h)
-    road_min_w = max(6.0, 0.03 * min_side)
-    road_max_w = max(road_min_w + 1.5, 0.09 * min_side)
+    fallback: Rect = _clamp_rect_to_area((0.0, 0.0, 12.0, 8.0), area_size)
 
-    n_roads = int(rng.integers(2, 6))
-    orientations = rng.choice(["horizontal", "vertical"], size=n_roads, p=[0.52, 0.48])
-    if n_roads >= 2:
-        orientations[0] = "horizontal"
-        orientations[1] = "vertical"
-
-    for idx, orientation in enumerate(orientations, start=1):
-        road_rect: Rect = (0.0, 0.0, 10.0, 8.0)
-        for _ in range(40):
-            width = float(rng.uniform(road_min_w, road_max_w))
-            if orientation == "horizontal":
-                length = float(rng.uniform(0.50 * area_w, 0.98 * area_w))
-                cx = float(rng.uniform(-0.18 * area_w, 0.18 * area_w))
-                cy = float(rng.uniform(-0.45 * area_h, 0.45 * area_h))
-                candidate = (cx, cy, length, width)
-            else:
-                length = float(rng.uniform(0.50 * area_h, 0.98 * area_h))
-                cx = float(rng.uniform(-0.45 * area_w, 0.45 * area_w))
-                cy = float(rng.uniform(-0.18 * area_h, 0.18 * area_h))
-                candidate = (cx, cy, width, length)
-
-            if not artificial_zones:
-                road_rect = candidate
-                break
-
-            overlap = max(
-                _rect_overlap_ratio(candidate, zone["rect"])  # type: ignore[index]
-                for zone in artificial_zones
-            )
-            if overlap < 0.88:
-                road_rect = candidate
-                break
-
-        artificial_zones.append({"name": f"road_{idx}", "kind": "road", "rect": road_rect})
-
-    n_plazas = int(rng.integers(1, 3))
-    for idx in range(1, n_plazas + 1):
-        plaza_rect: Rect = (0.0, 0.0, max(16.0, 0.15 * area_w), max(14.0, 0.13 * area_h))
-        for _ in range(40):
-            sx = float(rng.uniform(max(14.0, 0.08 * area_w), max(20.0, 0.24 * area_w)))
-            sy = float(rng.uniform(max(12.0, 0.08 * area_h), max(18.0, 0.24 * area_h)))
-            cx = float(rng.uniform(-0.42 * area_w, 0.42 * area_w))
-            cy = float(rng.uniform(-0.42 * area_h, 0.42 * area_h))
-            candidate = (cx, cy, sx, sy)
-            overlap = (
-                max(
-                    _rect_overlap_ratio(candidate, zone["rect"])  # type: ignore[index]
-                    for zone in artificial_zones
+    for _ in range(48):
+        if surface_type == "road_network":
+            width = float(rng.uniform(max(5.5, 0.03 * min_side), max(10.5, 0.08 * min_side)))
+            if bool(rng.integers(0, 2)):
+                length = float(rng.uniform(max(20.0, 0.34 * area_w), max(26.0, 0.94 * area_w)))
+                rect = (
+                    float(rng.uniform(-0.34 * area_w, 0.34 * area_w)),
+                    float(rng.uniform(-0.44 * area_h, 0.44 * area_h)),
+                    length,
+                    width,
                 )
-                if artificial_zones
-                else 0.0
+            else:
+                length = float(rng.uniform(max(20.0, 0.34 * area_h), max(26.0, 0.94 * area_h)))
+                rect = (
+                    float(rng.uniform(-0.44 * area_w, 0.44 * area_w)),
+                    float(rng.uniform(-0.34 * area_h, 0.34 * area_h)),
+                    width,
+                    length,
+                )
+        elif surface_type == "parking_lot":
+            rect = (
+                float(rng.uniform(-0.42 * area_w, 0.42 * area_w)),
+                float(rng.uniform(-0.42 * area_h, 0.42 * area_h)),
+                float(rng.uniform(max(12.0, 0.06 * area_w), max(18.0, 0.16 * area_w))),
+                float(rng.uniform(max(10.0, 0.06 * area_h), max(16.0, 0.14 * area_h))),
             )
-            if overlap < 0.92:
-                plaza_rect = candidate
-                break
-        artificial_zones.append({"name": f"plaza_{idx}", "kind": "plaza", "rect": plaza_rect})
+        elif surface_type == "industrial_concrete_pad":
+            rect = (
+                float(rng.uniform(-0.40 * area_w, 0.40 * area_w)),
+                float(rng.uniform(-0.40 * area_h, 0.40 * area_h)),
+                float(rng.uniform(max(18.0, 0.08 * area_w), max(28.0, 0.22 * area_w))),
+                float(rng.uniform(max(14.0, 0.07 * area_h), max(24.0, 0.18 * area_h))),
+            )
+        elif surface_type == "platform":
+            if bool(rng.integers(0, 2)):
+                rect = (
+                    float(rng.uniform(-0.40 * area_w, 0.40 * area_w)),
+                    float(rng.uniform(-0.40 * area_h, 0.40 * area_h)),
+                    float(rng.uniform(max(18.0, 0.10 * area_w), max(44.0, 0.30 * area_w))),
+                    float(rng.uniform(4.0, max(6.0, 0.05 * area_h))),
+                )
+            else:
+                rect = (
+                    float(rng.uniform(-0.40 * area_w, 0.40 * area_w)),
+                    float(rng.uniform(-0.40 * area_h, 0.40 * area_h)),
+                    float(rng.uniform(4.0, max(6.0, 0.05 * area_w))),
+                    float(rng.uniform(max(18.0, 0.10 * area_h), max(44.0, 0.30 * area_h))),
+                )
+        elif surface_type == "sidewalk":
+            if bool(rng.integers(0, 2)):
+                rect = (
+                    float(rng.uniform(-0.42 * area_w, 0.42 * area_w)),
+                    float(rng.uniform(-0.42 * area_h, 0.42 * area_h)),
+                    float(rng.uniform(max(16.0, 0.08 * area_w), max(34.0, 0.22 * area_w))),
+                    float(rng.uniform(1.8, 3.6)),
+                )
+            else:
+                rect = (
+                    float(rng.uniform(-0.42 * area_w, 0.42 * area_w)),
+                    float(rng.uniform(-0.42 * area_h, 0.42 * area_h)),
+                    float(rng.uniform(1.8, 3.6)),
+                    float(rng.uniform(max(16.0, 0.08 * area_h), max(34.0, 0.22 * area_h))),
+                )
+        else:
+            rect = (
+                float(rng.uniform(-0.40 * area_w, 0.40 * area_w)),
+                float(rng.uniform(-0.40 * area_h, 0.40 * area_h)),
+                float(rng.uniform(max(8.0, 0.05 * area_w), max(18.0, 0.12 * area_w))),
+                float(rng.uniform(max(4.0, 0.04 * area_h), max(10.0, 0.10 * area_h))),
+            )
 
-    for zone in artificial_zones:
-        cx, cy, _, _ = zone["rect"]  # type: ignore[index]
-        zone["z0"] = float(terrain_fn(np.array([cx]), np.array([cy]))[0] + rng.uniform(0.03, 0.12))
+        candidate = _clamp_rect_to_area(rect, area_size)
+        fallback = candidate
+        if _zone_overlap_is_ok(candidate, surface_type, existing_zones):
+            return candidate
 
+    return fallback
+
+
+def _sample_surface_rect_along_building(
+    rng: np.random.Generator,
+    area_size: Tuple[float, float],
+    building_rect: Rect,
+    surface_type: str,
+    existing_zones: Sequence[Dict[str, object]],
+) -> Rect:
+    """Sample a rectangle attached to a building edge for sidewalks and front areas."""
+    bx, by, bsx, bsy = building_rect
+    fallback = _sample_detached_surface_rect(rng, area_size, surface_type, existing_zones)
+
+    for _ in range(32):
+        side = str(rng.choice(["north", "south", "east", "west"]))
+        if surface_type == "sidewalk":
+            extent_scale = float(rng.uniform(0.84, 1.16))
+            thickness = float(rng.uniform(1.8, 3.4))
+            gap = float(rng.uniform(0.08, 0.40))
+            if side in {"north", "south"}:
+                rect = (
+                    bx,
+                    by + (0.5 * bsy + 0.5 * thickness + gap) * (1.0 if side == "north" else -1.0),
+                    max(3.0, bsx * extent_scale),
+                    thickness,
+                )
+            else:
+                rect = (
+                    bx + (0.5 * bsx + 0.5 * thickness + gap) * (1.0 if side == "east" else -1.0),
+                    by,
+                    thickness,
+                    max(3.0, bsy * extent_scale),
+                )
+        else:
+            width_scale = float(rng.uniform(0.92, 1.35))
+            depth = float(
+                rng.uniform(
+                    max(4.0, 0.18 * min(bsx, bsy)),
+                    max(7.0, 0.48 * max(bsx, bsy)),
+                )
+            )
+            gap = float(rng.uniform(0.20, 1.20))
+            if side in {"north", "south"}:
+                rect = (
+                    bx,
+                    by + (0.5 * bsy + 0.5 * depth + gap) * (1.0 if side == "north" else -1.0),
+                    max(4.0, bsx * width_scale),
+                    depth,
+                )
+            else:
+                rect = (
+                    bx + (0.5 * bsx + 0.5 * depth + gap) * (1.0 if side == "east" else -1.0),
+                    by,
+                    depth,
+                    max(4.0, bsy * width_scale),
+                )
+
+        candidate = _clamp_rect_to_area(rect, area_size)
+        fallback = candidate
+        if _zone_overlap_is_ok(candidate, surface_type, existing_zones):
+            return candidate
+
+    return fallback
+
+
+def _sample_natural_terrain_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    forbidden_rects: Sequence[Rect],
+    terrain_relief: float,
+) -> np.ndarray:
+    """Sample terrain points while keeping class 0 out of artificial surface zones."""
     x_nat, y_nat = _sample_xy(
         rng,
         n=n_points,
         area_size=area_size,
-        forbidden_rects=[zone["rect"] for zone in artificial_zones],  # type: ignore[index]
+        forbidden_rects=forbidden_rects,
         margin=0.0,
     )
-    terrain_noise = 0.01 + 0.05 * relief
+    terrain_noise = 0.01 + 0.05 * float(terrain_relief)
     z_nat = terrain_fn(x_nat, y_nat) + rng.normal(0.0, terrain_noise, size=n_points)
     labels = np.zeros(n_points, dtype=np.int32)
-    terrain_points = np.column_stack((x_nat, y_nat, z_nat, labels))
-    return terrain_points, terrain_fn, artificial_zones
+    return np.column_stack((x_nat, y_nat, z_nat, labels))
+
+
+def generate_terrain(
+    area_size: Tuple[float, float] = (240.0, 220.0),
+    n_points: int = 40_000,
+    seed: int = 42,
+    terrain_relief: float = 1.0,
+    artificial_zones: Sequence[Dict[str, object]] | None = None,
+) -> Tuple[np.ndarray, Callable[[np.ndarray, np.ndarray], np.ndarray], List[Dict[str, object]]]:
+    """
+    Generate natural terrain (class 0) and return:
+      - terrain points (N, 4)
+      - terrain height function z=f(x,y)
+      - artificial zones metadata used to mask class 0 sampling
+    `terrain_relief` controls elevation amplitude in [0,1]:
+      0 -> almost flat, 1 -> mountainous.
+    """
+    rng = np.random.default_rng(seed)
+    terrain_fn = _build_terrain_height_function(area_size, terrain_relief)
+    zones: List[Dict[str, object]]
+    if artificial_zones is None:
+        zones = []
+        detached_rng = np.random.default_rng(seed + 101)
+        default_counts = _split_count_by_weights(
+            9,
+            [
+                DEFAULT_ARTIFICIAL_SURFACE_TYPE_RATIOS[surface_type]
+                for surface_type in ARTIFICIAL_SURFACE_TYPES
+            ],
+        )
+        for surface_type, count in zip(ARTIFICIAL_SURFACE_TYPES, default_counts):
+            for index in range(int(count)):
+                rect = _sample_detached_surface_rect(
+                    rng=detached_rng,
+                    area_size=area_size,
+                    surface_type=surface_type,
+                    existing_zones=zones,
+                )
+                zones.append(
+                    _make_surface_zone(
+                        rng=detached_rng,
+                        terrain_fn=terrain_fn,
+                        name=f"{surface_type}_{index + 1}",
+                        surface_type=surface_type,
+                        rect=rect,
+                    )
+                )
+    else:
+        zones = list(artificial_zones)
+    terrain_points = _sample_natural_terrain_points(
+        rng=rng,
+        terrain_fn=terrain_fn,
+        area_size=area_size,
+        n_points=n_points,
+        forbidden_rects=[zone["rect"] for zone in zones],  # type: ignore[index]
+        terrain_relief=terrain_relief,
+    )
+    return terrain_points, terrain_fn, zones
 
 
 def _generate_building_points(
@@ -3798,7 +4194,8 @@ def place_objects(
     terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
     area_size: Tuple[float, float],
     points_per_class: Dict[int, int],
-    artificial_zones: Sequence[Dict[str, object]],
+    num_artificial_surfaces: int = 9,
+    artificial_surface_type_ratios: Dict[str, float] | None = None,
     num_trees: int = 70,
     num_buildings: int = 14,
     building_roof_type_ratios: Dict[str, float] | None = None,
@@ -3826,9 +4223,11 @@ def place_objects(
     grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
     grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
     seed: int = 43,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, List[Dict[str, object]]]:
     """
-    Place all non-terrain classes and return one (N, 4) array.
+    Place all non-terrain classes and return:
+      - one (N, 4) array with classes 1..7
+      - generated artificial surface zones metadata
     Uses classes:
       1 artificial surfaces
       2 low vegetation
@@ -3840,29 +4239,59 @@ def place_objects(
     """
     rng = np.random.default_rng(seed)
     cloud_parts: List[np.ndarray] = []
-
-    artificial_rects: List[Rect] = [zone["rect"] for zone in artificial_zones]  # type: ignore[index]
     building_rects: List[Rect] = []
 
-    # ------------------------------------------------------------------
-    # Class 1: artificial surfaces (roads/plaza as flattened patches)
-    # ------------------------------------------------------------------
-    n_artificial = int(points_per_class.get(1, 0))
-    if n_artificial > 0 and len(artificial_zones) > 0:
-        areas = [rect[2] * rect[3] for rect in artificial_rects]
-        zone_counts = _split_count_by_weights(n_artificial, areas)
-        zones_points = []
-        for zone, zone_n in zip(artificial_zones, zone_counts):
-            if zone_n <= 0:
-                continue
-            rect = zone["rect"]  # type: ignore[index]
-            x, y = _sample_inside_rect(rng, zone_n, rect, margin=0.35)
-            z0 = float(zone["z0"])  # type: ignore[index]
-            z = np.full(zone_n, z0) + rng.normal(0.0, 0.01, size=zone_n)
-            labels = np.full(zone_n, 1, dtype=np.int32)
-            zones_points.append(np.column_stack((x, y, z, labels)))
-        if zones_points:
-            cloud_parts.append(np.vstack(zones_points))
+    if num_artificial_surfaces <= 0:
+        raise ValueError("`num_artificial_surfaces` must be > 0.")
+
+    if artificial_surface_type_ratios is None:
+        artificial_surface_type_ratios_eff = _sample_scene_artificial_surface_type_ratios(rng)
+    else:
+        artificial_surface_type_ratios_eff = {
+            surface_type: float(artificial_surface_type_ratios.get(surface_type, 0.0))
+            for surface_type in ARTIFICIAL_SURFACE_TYPES
+        }
+        if np.isclose(sum(artificial_surface_type_ratios_eff.values()), 0.0):
+            artificial_surface_type_ratios_eff = dict(DEFAULT_ARTIFICIAL_SURFACE_TYPE_RATIOS)
+
+    surface_type_counts = {
+        surface_type: int(count)
+        for surface_type, count in zip(
+            ARTIFICIAL_SURFACE_TYPES,
+            _split_count_by_weights(
+                int(num_artificial_surfaces),
+                [
+                    artificial_surface_type_ratios_eff[surface_type]
+                    for surface_type in ARTIFICIAL_SURFACE_TYPES
+                ],
+            ),
+        )
+    }
+
+    artificial_zones: List[Dict[str, object]] = []
+    for surface_type in ARTIFICIAL_SURFACE_TYPES:
+        if surface_type in {"sidewalk", "building_front_area"}:
+            continue
+        for index in range(surface_type_counts[surface_type]):
+            rect = _sample_detached_surface_rect(
+                rng=rng,
+                area_size=area_size,
+                surface_type=surface_type,
+                existing_zones=artificial_zones,
+            )
+            artificial_zones.append(
+                _make_surface_zone(
+                    rng=rng,
+                    terrain_fn=terrain_fn,
+                    name=f"{surface_type}_{index + 1}",
+                    surface_type=surface_type,
+                    rect=rect,
+                )
+            )
+
+    base_artificial_rects: List[Rect] = [
+        zone["rect"] for zone in artificial_zones  # type: ignore[index]
+    ]
 
     # ------------------------------------------------------------------
     # Class 4: buildings (cuboids sampled on walls + roof)
@@ -3921,8 +4350,8 @@ def place_objects(
             bbox_w = cos_yaw * width + sin_yaw * depth
             bbox_d = sin_yaw * width + cos_yaw * depth
 
-            # Keep buildings away from roads and from each other.
-            forbidden = artificial_rects + [
+            # Keep buildings away from detached artificial surfaces and from each other.
+            forbidden = base_artificial_rects + [
                 (bx, by, bsx + 6.0, bsy + 6.0) for bx, by, bsx, bsy in building_rects
             ]
             cx, cy = _sample_single_xy(
@@ -3949,6 +4378,59 @@ def place_objects(
                     base_z=base_z,
                 )
             )
+
+    for surface_type in ("sidewalk", "building_front_area"):
+        for index in range(surface_type_counts[surface_type]):
+            if building_rects:
+                anchor = building_rects[int(rng.integers(0, len(building_rects)))]
+                rect = _sample_surface_rect_along_building(
+                    rng=rng,
+                    area_size=area_size,
+                    building_rect=anchor,
+                    surface_type=surface_type,
+                    existing_zones=artificial_zones,
+                )
+            else:
+                rect = _sample_detached_surface_rect(
+                    rng=rng,
+                    area_size=area_size,
+                    surface_type=surface_type,
+                    existing_zones=artificial_zones,
+                )
+            artificial_zones.append(
+                _make_surface_zone(
+                    rng=rng,
+                    terrain_fn=terrain_fn,
+                    name=f"{surface_type}_{index + 1}",
+                    surface_type=surface_type,
+                    rect=rect,
+                )
+            )
+
+    artificial_rects: List[Rect] = [zone["rect"] for zone in artificial_zones]  # type: ignore[index]
+
+    # ------------------------------------------------------------------
+    # Class 1: artificial surfaces
+    # ------------------------------------------------------------------
+    n_artificial = int(points_per_class.get(1, 0))
+    if n_artificial > 0 and artificial_zones:
+        areas = [max(1e-6, rect[2] * rect[3]) for rect in artificial_rects]
+        zone_counts = _split_count_by_weights(n_artificial, areas)
+        zones_points: List[np.ndarray] = []
+        for zone, zone_n in zip(artificial_zones, zone_counts):
+            if zone_n <= 0:
+                continue
+            rect = zone["rect"]  # type: ignore[index]
+            surface_type = str(zone.get("surface_type", zone.get("kind", ""))).strip().lower()
+            margin = 0.30 if surface_type == "sidewalk" else 0.35
+            x, y = _sample_inside_rect(rng, zone_n, rect, margin=margin)
+            z0 = float(zone["z0"])  # type: ignore[index]
+            roughness = 0.006 if surface_type in {"sidewalk", "platform"} else 0.010
+            z = np.full(zone_n, z0) + rng.normal(0.0, roughness, size=zone_n)
+            labels = np.full(zone_n, 1, dtype=np.int32)
+            zones_points.append(np.column_stack((x, y, z, labels)))
+        if zones_points:
+            cloud_parts.append(np.vstack(zones_points))
 
     # ------------------------------------------------------------------
     # Class 3: high vegetation (trees)
@@ -4077,10 +4559,13 @@ def place_objects(
             )
 
     # ------------------------------------------------------------------
-    # Class 6: vehicles (car / truck / bus on roads and plazas)
+    # Class 6: vehicles (car / truck / bus on drivable artificial surfaces)
     # ------------------------------------------------------------------
     n_vehicle_points = int(points_per_class.get(6, 0))
-    if n_vehicle_points > 0 and len(artificial_zones) > 0:
+    vehicle_zones = [zone for zone in artificial_zones if bool(zone.get("vehicle_allowed", False))]
+    if not vehicle_zones:
+        vehicle_zones = list(artificial_zones)
+    if n_vehicle_points > 0 and vehicle_zones:
         vehicle_type_ratios = vehicle_type_ratios or dict(DEFAULT_VEHICLE_TYPE_RATIOS)
         n_vehicle_eff = max(1, min(num_vehicles, n_vehicle_points))
         per_vehicle = _split_count_evenly(n_vehicle_points, n_vehicle_eff)
@@ -4096,12 +4581,18 @@ def place_objects(
         vehicle_types = vehicle_types[:n_vehicle_eff]
         rng.shuffle(vehicle_types)
 
-        zone_prob = np.array([rect[2] * rect[3] for rect in artificial_rects], dtype=np.float64)
+        zone_prob = np.array(
+            [
+                zone["rect"][2] * zone["rect"][3]  # type: ignore[index]
+                for zone in vehicle_zones
+            ],
+            dtype=np.float64,
+        )
         zone_prob /= zone_prob.sum()
         vehicle_rects: List[Rect] = []
         for n_pts, vehicle_type in zip(per_vehicle, vehicle_types):
-            zone_idx = int(rng.choice(len(artificial_zones), p=zone_prob))
-            zone = artificial_zones[zone_idx]
+            zone_idx = int(rng.choice(len(vehicle_zones), p=zone_prob))
+            zone = vehicle_zones[zone_idx]
             rect = zone["rect"]  # type: ignore[index]
 
             length, width, height = _sample_vehicle_dimensions(rng, vehicle_type=vehicle_type)
@@ -4245,8 +4736,8 @@ def place_objects(
         cloud_parts.append(np.vstack(artifact_parts))
 
     if not cloud_parts:
-        return np.empty((0, 4), dtype=np.float64)
-    return np.vstack(cloud_parts)
+        return np.empty((0, 4), dtype=np.float64), artificial_zones
+    return np.vstack(cloud_parts), artificial_zones
 
 
 def visualize_point_cloud(points: np.ndarray, labels: np.ndarray) -> None:
@@ -4371,6 +4862,7 @@ def _generate_object_counts(
 
     # Expected object density per hectare.
     densities_per_ha = {
+        "num_artificial_surfaces": 1.8,
         "num_trees": 14.0,
         "num_buildings": 2.6,
         "num_structures": 1.6,
@@ -4378,6 +4870,7 @@ def _generate_object_counts(
         "num_artifact_clusters": 7.5,
     }
     min_counts = {
+        "num_artificial_surfaces": 5,
         "num_trees": 8,
         "num_buildings": 3,
         "num_structures": 2,
@@ -4404,6 +4897,9 @@ def _print_scene_params(
     randomize_object_counts: bool,
     object_counts: Dict[str, int],
     class_ratios: Dict[int, float],
+    artificial_surface_type_ratios: Dict[str, float] | None,
+    artificial_surface_count_overridden: bool,
+    artificial_surface_type_distribution_overridden: bool,
     building_roof_type_ratios: Dict[str, float] | None,
     building_count_overridden: bool,
     building_roof_type_distribution_overridden: bool,
@@ -4454,6 +4950,18 @@ def _print_scene_params(
         for vehicle_type in VEHICLE_TYPES
     )
     print(f"Vehicle type distribution: {vehicle_distribution}")
+    if (
+        artificial_surface_type_distribution_overridden
+        and artificial_surface_type_ratios is not None
+    ):
+        surface_distribution = ", ".join(
+            f"{ARTIFICIAL_SURFACE_TYPE_NAMES[surface_type]}="
+            f"{artificial_surface_type_ratios[surface_type] * 100.0:.1f}%"
+            for surface_type in ARTIFICIAL_SURFACE_TYPES
+        )
+        print(f"Artificial surface type distribution: {surface_distribution}")
+    else:
+        print("Artificial surface type distribution: random per scene")
     if building_roof_type_distribution_overridden and building_roof_type_ratios is not None:
         building_distribution = ", ".join(
             f"{BUILDING_ROOF_TYPE_NAMES[roof_type]}={building_roof_type_ratios[roof_type] * 100.0:.1f}%"
@@ -4478,6 +4986,8 @@ def _print_scene_params(
         print(f"Tree crown type distribution: {tree_distribution}")
     else:
         print("Tree crown type distribution: random per scene")
+    if artificial_surface_count_overridden:
+        print("Artificial surface count mode: custom override")
     if building_count_overridden:
         print("Building count mode: custom override")
     if structure_count_overridden:
@@ -4525,6 +5035,7 @@ def _print_scene_params(
         )
     print(
         "Object counts: "
+        f"artificial_surfaces={object_counts['num_artificial_surfaces']}, "
         f"trees={object_counts['num_trees']}, "
         f"buildings={object_counts['num_buildings']}, "
         f"structures={object_counts['num_structures']}, "
@@ -4544,6 +5055,8 @@ def _run_pipeline(
     randomize_object_counts: bool,
     seed: int,
     class_percentages: Sequence[float] | Dict[int, float] | None = None,
+    artificial_surface_count: int | None = None,
+    artificial_surface_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     tree_count: int | None = None,
     tree_crown_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     random_tree_crown_size: bool = True,
@@ -4598,6 +5111,8 @@ def _run_pipeline(
     _validate_positive(grass_patch_max_size_x, "grass_patch_max_size_x")
     _validate_positive(grass_patch_max_size_y, "grass_patch_max_size_y")
     _validate_positive(grass_max_height, "grass_max_height")
+    if artificial_surface_count is not None and int(artificial_surface_count) <= 0:
+        raise ValueError("`artificial_surface_count` must be > 0 when provided.")
     if shrub_count is not None and int(shrub_count) <= 0:
         raise ValueError("`shrub_count` must be > 0 when provided.")
     if grass_patch_count is not None and int(grass_patch_count) <= 0:
@@ -4618,6 +5133,14 @@ def _run_pipeline(
     # ----------------------------- Scene config -----------------------------
     area_size = (float(area_width), float(area_length))
     class_ratios = _class_ratios_from_percentages(class_percentages)
+    artificial_surface_type_distribution_overridden = (
+        artificial_surface_type_percentages is not None
+    )
+    artificial_surface_type_ratios = (
+        _artificial_surface_type_ratios_from_percentages(artificial_surface_type_percentages)
+        if artificial_surface_type_distribution_overridden
+        else None
+    )
     vehicle_type_ratios = _vehicle_type_ratios_from_percentages(vehicle_type_percentages)
     building_roof_type_distribution_overridden = building_roof_type_percentages is not None
     building_roof_type_ratios = (
@@ -4643,12 +5166,18 @@ def _run_pipeline(
         rng=scene_rng,
         randomize_counts=randomize_object_counts,
     )
+    artificial_surface_count_overridden = artificial_surface_count is not None
     building_count_overridden = building_count is not None
     structure_count_overridden = structure_count is not None
     tree_count_overridden = tree_count is not None
     vehicle_count_overridden = vehicle_count is not None
     shrub_count_overridden = shrub_count is not None
     grass_patch_count_overridden = grass_patch_count is not None
+    if artificial_surface_count_overridden:
+        artificial_surface_count_int = int(artificial_surface_count)
+        if artificial_surface_count_int <= 0:
+            raise ValueError("`artificial_surface_count` must be > 0 when provided.")
+        object_counts["num_artificial_surfaces"] = artificial_surface_count_int
     if building_count_overridden:
         building_count_int = int(building_count)
         if building_count_int <= 0:
@@ -4682,6 +5211,11 @@ def _run_pipeline(
         randomize_object_counts=randomize_object_counts,
         object_counts=object_counts,
         class_ratios=class_ratios,
+        artificial_surface_type_ratios=artificial_surface_type_ratios,
+        artificial_surface_count_overridden=artificial_surface_count_overridden,
+        artificial_surface_type_distribution_overridden=(
+            artificial_surface_type_distribution_overridden
+        ),
         building_roof_type_ratios=building_roof_type_ratios,
         building_count_overridden=building_count_overridden,
         building_roof_type_distribution_overridden=building_roof_type_distribution_overridden,
@@ -4713,22 +5247,14 @@ def _run_pipeline(
     )
 
     points_per_class = allocate_points(total_points=total_points, class_ratios=class_ratios)
+    terrain_fn = _build_terrain_height_function(area_size, terrain_relief)
 
-    terrain_points, terrain_fn, artificial_zones = generate_terrain(
-        area_size=area_size,
-        n_points=points_per_class[0],
-        seed=seed,
-        terrain_relief=terrain_relief,
-    )
-    n_roads = sum(1 for zone in artificial_zones if zone.get("kind") == "road")
-    n_plazas = sum(1 for zone in artificial_zones if zone.get("kind") == "plaza")
-    print(f"Artificial zones: roads={n_roads}, plazas={n_plazas}")
-
-    object_points = place_objects(
+    object_points, artificial_zones = place_objects(
         terrain_fn=terrain_fn,
         area_size=area_size,
         points_per_class=points_per_class,
-        artificial_zones=artificial_zones,
+        num_artificial_surfaces=object_counts["num_artificial_surfaces"],
+        artificial_surface_type_ratios=artificial_surface_type_ratios,
         num_trees=num_trees,
         num_buildings=num_buildings,
         building_roof_type_ratios=building_roof_type_ratios,
@@ -4757,6 +5283,28 @@ def _run_pipeline(
         grass_max_height=float(grass_max_height),
         seed=seed + 1,
     )
+    terrain_points = _sample_natural_terrain_points(
+        rng=np.random.default_rng(seed),
+        terrain_fn=terrain_fn,
+        area_size=area_size,
+        n_points=points_per_class[0],
+        forbidden_rects=[zone["rect"] for zone in artificial_zones],  # type: ignore[index]
+        terrain_relief=terrain_relief,
+    )
+    artificial_zone_counts = {
+        surface_type: sum(
+            1
+            for zone in artificial_zones
+            if str(zone.get("surface_type", zone.get("kind", ""))).strip().lower()
+            == surface_type
+        )
+        for surface_type in ARTIFICIAL_SURFACE_TYPES
+    }
+    artificial_zone_summary = ", ".join(
+        f"{surface_type}={artificial_zone_counts[surface_type]}"
+        for surface_type in ARTIFICIAL_SURFACE_TYPES
+    )
+    print(f"Artificial zones: {artificial_zone_summary}")
 
     point_cloud = np.vstack([terrain_points, object_points])
 
@@ -4798,6 +5346,8 @@ def generate_point_cloud(
     randomize_object_counts: bool = True,
     seed: int = 12,
     class_percentages: Sequence[float] | Dict[int, float] | None = None,
+    artificial_surface_count: int | None = None,
+    artificial_surface_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     tree_count: int | None = None,
     tree_crown_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     random_tree_crown_size: bool = True,
@@ -4829,6 +5379,8 @@ def generate_point_cloud(
       - no matplotlib window
       - no CSV/PLY files written
       - optional custom class percentages for classes 0..7
+      - optional custom number of artificial surface objects (class 1)
+      - optional custom artificial surface type percentages
       - optional custom number of tree instances
       - optional custom tree crown type percentages
       - optional custom high vegetation crown sizing controls
@@ -4853,6 +5405,8 @@ def generate_point_cloud(
         randomize_object_counts=bool(randomize_object_counts),
         seed=int(seed),
         class_percentages=class_percentages,
+        artificial_surface_count=artificial_surface_count,
+        artificial_surface_type_percentages=artificial_surface_type_percentages,
         tree_count=tree_count,
         tree_crown_type_percentages=tree_crown_type_percentages,
         random_tree_crown_size=bool(random_tree_crown_size),
@@ -4889,6 +5443,8 @@ def main(
     randomize_object_counts: bool = True,
     seed: int = 12,
     class_percentages: Sequence[float] | Dict[int, float] | None = None,
+    artificial_surface_count: int | None = None,
+    artificial_surface_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     tree_count: int | None = None,
     tree_crown_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     random_tree_crown_size: bool = True,
@@ -4923,6 +5479,7 @@ def main(
       - uses mountainous terrain relief (`terrain_relief=1.0`)
       - randomizes object counts based on area
       - uses default class distribution unless custom percentages are provided
+      - uses random artificial surface generation unless custom values are provided
       - uses default high-vegetation generation unless custom values are provided
       - uses default building generation unless custom values are provided
       - uses random structure generation unless custom values are provided
@@ -4943,6 +5500,8 @@ def main(
         randomize_object_counts=bool(randomize_object_counts),
         seed=int(seed),
         class_percentages=class_percentages,
+        artificial_surface_count=artificial_surface_count,
+        artificial_surface_type_percentages=artificial_surface_type_percentages,
         tree_count=tree_count,
         tree_crown_type_percentages=tree_crown_type_percentages,
         random_tree_crown_size=bool(random_tree_crown_size),
@@ -5029,6 +5588,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Optional custom class shares in percent for classes 0..7 "
             f"({len(CLASS_IDS)} values expected). "
             "Example: --class-percentages 38 13 16 14 10 4 3 2"
+        ),
+    )
+    parser.add_argument(
+        "--artificial-surface-count",
+        type=int,
+        help="Optional custom number of generated artificial surface objects (class 1).",
+    )
+    parser.add_argument(
+        "--artificial-surface-type-percentages",
+        type=float,
+        nargs=len(ARTIFICIAL_SURFACE_TYPES),
+        metavar="PCT",
+        help=(
+            "Optional artificial surface type shares in percent for "
+            "[road_network sidewalk parking_lot building_front_area "
+            "industrial_concrete_pad platform]. "
+            "Example: --artificial-surface-type-percentages 30 22 16 10 12 10"
         ),
     )
     parser.add_argument(
@@ -5273,6 +5849,12 @@ def cli(argv: Sequence[str] | None = None) -> int:
         pipeline_kwargs["seed"] = int(args.seed)
     if "class_percentages" in explicit_dests:
         pipeline_kwargs["class_percentages"] = args.class_percentages
+    if "artificial_surface_count" in explicit_dests:
+        pipeline_kwargs["artificial_surface_count"] = args.artificial_surface_count
+    if "artificial_surface_type_percentages" in explicit_dests:
+        pipeline_kwargs["artificial_surface_type_percentages"] = (
+            args.artificial_surface_type_percentages
+        )
     if "tree_count" in explicit_dests:
         pipeline_kwargs["tree_count"] = args.tree_count
     if "tree_crown_type_percentages" in explicit_dests:
