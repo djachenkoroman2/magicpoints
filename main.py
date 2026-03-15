@@ -271,56 +271,6 @@ class DBSCANDialogParams:
     output_path: str
 
 
-def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> None:
-    """Export point cloud data to ASCII PLY, preserving optional RGB and label channels."""
-    points = np.ascontiguousarray(cloud.points, dtype=np.float32)
-    if points.ndim != 2 or points.shape[1] != 3:
-        raise ValueError("Point cloud points must have shape (N, 3).")
-
-    rgb_uint8 = None
-    if cloud.rgb is not None and cloud.rgb.size > 0:
-        rgb = np.ascontiguousarray(cloud.rgb, dtype=np.float32)
-        rgb_uint8 = np.clip(np.round(rgb * 255.0), 0.0, 255.0).astype(np.uint8)
-
-    labels = None
-    if cloud.labels is not None and cloud.labels.size > 0:
-        labels = np.ascontiguousarray(cloud.labels, dtype=np.int32)
-
-    columns: List[np.ndarray] = [points[:, 0], points[:, 1], points[:, 2]]
-    fmt = ["%.6f", "%.6f", "%.6f"]
-    property_lines = [
-        "property float x",
-        "property float y",
-        "property float z",
-    ]
-
-    if rgb_uint8 is not None:
-        columns.extend([rgb_uint8[:, 0], rgb_uint8[:, 1], rgb_uint8[:, 2]])
-        fmt.extend(["%d", "%d", "%d"])
-        property_lines.extend(
-            [
-                "property uchar red",
-                "property uchar green",
-                "property uchar blue",
-            ]
-        )
-
-    if labels is not None:
-        columns.append(labels)
-        fmt.append("%d")
-        property_lines.append("property int label")
-
-    matrix = np.column_stack(columns)
-    with output_path.open("w", encoding="utf-8") as fh:
-        fh.write("ply\n")
-        fh.write("format ascii 1.0\n")
-        fh.write(f"element vertex {points.shape[0]}\n")
-        for line in property_lines:
-            fh.write(f"{line}\n")
-        fh.write("end_header\n")
-        np.savetxt(fh, matrix, fmt=fmt)
-
-
 class PointCloudLoaderError(Exception):
     pass
 
@@ -3589,6 +3539,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.max_points = max_points
         self.current_cloud: Optional[PointCloudData] = None
+        self._split_module = None
         self._synthetic_module = None
         self._dbscan_module = None
         self._generated_cloud_raw: Optional[np.ndarray] = None
@@ -3646,47 +3597,57 @@ class MainWindow(QMainWindow):
         self.split_action.triggered.connect(self.split_point_cloud_by_label)
 
         self.dbscan_action = QAction(
-            self.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+            self._icon("dbscan", QStyle.SP_FileDialogDetailedView),
             "DBSCAN...",
             self,
         )
         self.dbscan_action.setToolTip("Run DBSCAN clustering on the current point cloud")
+        self.dbscan_action.setEnabled(False)
         self.dbscan_action.triggered.connect(self.run_dbscan_dialog)
 
         self.fit_action = QAction(self._icon("fit", QStyle.SP_ArrowUp), "Fit to View", self)
         self.fit_action.setToolTip("Frame the whole cloud in the viewport")
+        self.fit_action.setEnabled(False)
         self.fit_action.triggered.connect(self.fit_to_view)
 
         self.reset_action = QAction(self._icon("reset", QStyle.SP_BrowserReload), "Reset View", self)
         self.reset_action.setToolTip("Reset default camera orientation")
+        self.reset_action.setEnabled(False)
         self.reset_action.triggered.connect(self.reset_view)
 
         self.view_top_action = QAction(self._icon("view_top", QStyle.SP_ArrowUp), "Top View", self)
         self.view_top_action.setToolTip("View from top")
+        self.view_top_action.setEnabled(False)
         self.view_top_action.triggered.connect(self.set_view_top)
 
         self.view_front_action = QAction(self._icon("view_front", QStyle.SP_ArrowRight), "Front View", self)
         self.view_front_action.setToolTip("View from front")
+        self.view_front_action.setEnabled(False)
         self.view_front_action.triggered.connect(self.set_view_front)
 
         self.view_left_action = QAction(self._icon("view_left", QStyle.SP_ArrowLeft), "Left Side View", self)
         self.view_left_action.setToolTip("View from left side")
+        self.view_left_action.setEnabled(False)
         self.view_left_action.triggered.connect(self.set_view_left)
 
         self.view_right_action = QAction(self._icon("view_right", QStyle.SP_ArrowRight), "Right Side View", self)
         self.view_right_action.setToolTip("View from right side")
+        self.view_right_action.setEnabled(False)
         self.view_right_action.triggered.connect(self.set_view_right)
 
         self.view_back_action = QAction(self._icon("view_back", QStyle.SP_ArrowDown), "Back View", self)
         self.view_back_action.setToolTip("View from back")
+        self.view_back_action.setEnabled(False)
         self.view_back_action.triggered.connect(self.set_view_back)
 
         self.view_bottom_action = QAction(self._icon("view_bottom", QStyle.SP_ArrowDown), "Bottom View", self)
         self.view_bottom_action.setToolTip("View from bottom")
+        self.view_bottom_action.setEnabled(False)
         self.view_bottom_action.triggered.connect(self.set_view_bottom)
 
         self.view_front_iso_action = QAction(self._icon("view_front_iso", QStyle.SP_FileDialogDetailedView), "Front Isometric", self)
         self.view_front_iso_action.setToolTip("Front isometric view")
+        self.view_front_iso_action.setEnabled(False)
         self.view_front_iso_action.triggered.connect(self.set_view_front_isometric)
 
         self.toggle_rgb_action = QAction(self._icon("toggle_rgb", QStyle.SP_DialogYesButton), "Toggle RGB Mode", self)
@@ -3698,6 +3659,7 @@ class MainWindow(QMainWindow):
         self.game_navigation_action.setCheckable(True)
         self.game_navigation_action.setShortcut("F2")
         self.game_navigation_action.setToolTip("Toggle WASD + mouse navigation mode")
+        self.game_navigation_action.setEnabled(False)
         self.game_navigation_action.triggered.connect(self.toggle_game_navigation_mode)
 
         self.generate_synthetic_action = QAction(self._icon("generate_synthetic", QStyle.SP_MediaPlay), "Generate Synthetic Cloud...", self)
@@ -3762,7 +3724,10 @@ class MainWindow(QMainWindow):
             f"QToolButton {{ min-width: {icon_px + 10}px; min-height: {icon_px + 10}px; }}"
         )
         toolbar.addAction(self.open_action)
+        toolbar.addSeparator()
         toolbar.addAction(self.split_action)
+        toolbar.addAction(self.dbscan_action)
+        toolbar.addSeparator()
         toolbar.addAction(self.fit_action)
         toolbar.addAction(self.reset_action)
         toolbar.addAction(self.view_top_action)
@@ -3841,25 +3806,20 @@ class MainWindow(QMainWindow):
         self._last_split_prefix = prefix
         self._last_split_dir = str(output_dir)
 
-        labels = self.current_cloud.labels
-        unique_labels = np.unique(labels)
-        if unique_labels.size == 0:
-            QMessageBox.information(
-                self,
-                "No Labels",
-                "The current point cloud does not contain any label values.",
-            )
+        split_module = self._get_split_module()
+        if split_module is None:
             return
 
-        saved_paths: List[Path] = []
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            for label in unique_labels:
-                indices = np.flatnonzero(labels == label)
-                subset = self.current_cloud.subset(indices)
-                out_path = output_dir / f"{prefix}_{int(label)}.ply"
-                export_point_cloud_data_to_ply(subset, out_path)
-                saved_paths.append(out_path)
+            result = split_module.split_point_cloud_by_label_arrays(
+                points=self.current_cloud.points,
+                labels=self.current_cloud.labels,
+                prefix=prefix,
+                output_dir=output_dir,
+                rgb=self.current_cloud.rgb,
+                source_path=self.current_cloud.file_path,
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
@@ -3871,13 +3831,13 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         self.statusBar().showMessage(
-            f"Saved {len(saved_paths)} class PLY files to {output_dir}",
+            f"Saved {len(result.files)} class PLY files to {output_dir}",
             7000,
         )
         QMessageBox.information(
             self,
             "Split Complete",
-            f"Saved {len(saved_paths)} PLY files to:\n{output_dir}",
+            f"Saved {len(result.files)} PLY files to:\n{output_dir}",
         )
 
     def _current_cloud_display_name(self) -> str:
@@ -4377,6 +4337,29 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Saved generated cloud: {out_path}", 7000)
 
+    def _update_view_actions_enabled(self, cloud: Optional[PointCloudData]) -> None:
+        has_cloud = cloud is not None and cloud.loaded_count > 0
+        for action in (
+            self.fit_action,
+            self.reset_action,
+            self.view_top_action,
+            self.view_front_action,
+            self.view_left_action,
+            self.view_right_action,
+            self.view_back_action,
+            self.view_bottom_action,
+            self.view_front_iso_action,
+            self.game_navigation_action,
+        ):
+            action.setEnabled(has_cloud)
+
+        if not has_cloud and self.game_navigation_action.isChecked():
+            self.game_navigation_action.blockSignals(True)
+            self.game_navigation_action.setChecked(False)
+            self.game_navigation_action.blockSignals(False)
+
+        self.toggle_rgb_action.setEnabled(bool(has_cloud and cloud is not None and cloud.has_rgb))
+
     def _apply_cloud(self, cloud: PointCloudData) -> None:
         self.current_cloud = cloud
         self.gl_widget.set_point_cloud(cloud)
@@ -4389,8 +4372,9 @@ class MainWindow(QMainWindow):
         else:
             self.gl_widget.set_color_mode("neutral")
 
-        self.toggle_rgb_action.setEnabled(cloud.has_rgb)
+        self._update_view_actions_enabled(cloud)
         self.split_action.setEnabled(cloud.has_labels)
+        self.dbscan_action.setEnabled(cloud.loaded_count > 0)
         self._update_status_bar()
 
     def _get_synthetic_module(self):
@@ -4407,6 +4391,21 @@ class MainWindow(QMainWindow):
             return None
         self._synthetic_module = synthetic_module
         return self._synthetic_module
+
+    def _get_split_module(self):
+        if self._split_module is not None:
+            return self._split_module
+        try:
+            from utils import app_split_by_label as split_module
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Split Error",
+                f"Failed to import utils/app_split_by_label.py:\n{exc}",
+            )
+            return None
+        self._split_module = split_module
+        return self._split_module
 
     def _get_dbscan_module(self):
         if self._dbscan_module is not None:
