@@ -25,6 +25,8 @@
 - орбита/вращение: ЛКМ;
 - панорамирование: СКМ или `Shift` + ЛКМ;
 - приближение/отдаление: ПКМ drag и колесо мыши;
+- для обычного режима просмотра вращение, панорамирование и `ПКМ drag` работают инверсно;
+- в `Game Navigation Mode` управление мышью оставлено прежним;
 - готовые виды: `Top`, `Front`, `Left Side`, `Right Side`, `Back`, `Bottom`, `Front Isometric`;
 - `Fit to View`;
 - `Reset View`;
@@ -45,25 +47,28 @@
   - `bounding_box.min`;
   - `bounding_box.max`.
 - После выполнения bounding boxes автоматически накладываются поверх текущего облака.
-- Команда `File -> Open Clusters YAML...` позволяет отдельно загрузить YAML с кластерами и отобразить его как overlay.
+- Команда `File -> Open Clusters File` позволяет отдельно загрузить YAML-файл с кластерами и отобразить его как overlay.
+- Команда `Edit -> Clear Viewport` полностью очищает viewport: удаляет текущее облако и все загруженные bounding boxes.
 
 ### Генерация синтетических облаков
-- Команда `Generate -> Generate Synthetic Cloud...` открывает диалог с параметрами генерации.
+- Команда `Generate -> Generate Exterior Synthetic Cloud...` открывает диалог с параметрами генерации.
 - Поддерживается экспорт и импорт YAML-конфигурации генерации.
 - После генерации результат автоматически загружается в главное окно.
-- Команда `Generate -> Save Generated Cloud as PLY...` сохраняет последнее сгенерированное облако.
+- Команда `File -> Save Cloud as PLY...` сохраняет текущее облако точек, отображаемое во viewport, без overlay bounding boxes.
 
 ## Структура интерфейса
 - `File`
-  - `Open File`
-  - `Open Clusters YAML...`
+  - `Open Point Cloud File`
+  - `Open Clusters File`
+  - `Save Cloud as PLY...`
+  - `Save View as PNG...`
   - `Exit`
 - `Edit`
   - `Split...`
   - `DBSCAN...`
+  - `Clear Viewport`
 - `Generate`
-  - `Generate Synthetic Cloud...`
-  - `Save Generated Cloud as PLY...`
+  - `Generate Exterior Synthetic Cloud...`
 - `View`
   - `Fit to View`
   - `Reset View`

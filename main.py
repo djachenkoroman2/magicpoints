@@ -939,6 +939,60 @@ class PointCloudLoader:
         return np.clip(rgb, 0.0, 1.0).astype(np.float32, copy=False)
 
 
+def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> None:
+    points = np.ascontiguousarray(cloud.points, dtype=np.float32)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("Point cloud points must have shape (N, 3).")
+
+    rgb_uint8 = None
+    if cloud.rgb is not None and cloud.rgb.size > 0:
+        rgb = np.ascontiguousarray(cloud.rgb, dtype=np.float32)
+        if rgb.shape != (points.shape[0], 3):
+            raise ValueError("Point cloud RGB data must have shape (N, 3).")
+        rgb_uint8 = np.clip(np.round(rgb * 255.0), 0.0, 255.0).astype(np.uint8)
+
+    labels = None
+    if cloud.labels is not None and cloud.labels.size > 0:
+        labels = np.ascontiguousarray(cloud.labels, dtype=np.int32).reshape(-1)
+        if labels.shape[0] != points.shape[0]:
+            raise ValueError("Point cloud labels must contain exactly one value per point.")
+
+    columns: List[np.ndarray] = [points[:, 0], points[:, 1], points[:, 2]]
+    fmt = ["%.6f", "%.6f", "%.6f"]
+    property_lines = [
+        "property float x",
+        "property float y",
+        "property float z",
+    ]
+
+    if rgb_uint8 is not None:
+        columns.extend([rgb_uint8[:, 0], rgb_uint8[:, 1], rgb_uint8[:, 2]])
+        fmt.extend(["%d", "%d", "%d"])
+        property_lines.extend(
+            [
+                "property uchar red",
+                "property uchar green",
+                "property uchar blue",
+            ]
+        )
+
+    if labels is not None:
+        columns.append(labels)
+        fmt.append("%d")
+        property_lines.append("property int label")
+
+    matrix = np.column_stack(columns)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as fh:
+        fh.write("ply\n")
+        fh.write("format ascii 1.0\n")
+        fh.write(f"element vertex {points.shape[0]}\n")
+        for line in property_lines:
+            fh.write(f"{line}\n")
+        fh.write("end_header\n")
+        np.savetxt(fh, matrix, fmt=fmt)
+
+
 FALLBACK_SYNTHETIC_CLASS_NAMES: Dict[int, str] = {
     0: "Natural surface",
     1: "Artificial surface",
@@ -2986,6 +3040,36 @@ class PointCloudGLWidget(QOpenGLWidget):
             self._upload_cluster_overlay()
         self.update()
 
+    def clear_viewport(self) -> None:
+        if self._navigation_mode == "game":
+            self.set_game_navigation_enabled(False)
+
+        self._cloud = None
+        self._cluster_boxes = ()
+        self._point_count = 0
+        self._overlay_vertex_count = 0
+        self._color_mode = "neutral"
+        self._scene_center = np.zeros(3, dtype=np.float32)
+        self._scene_radius = 1.0
+        self._pan = np.zeros(3, dtype=np.float32)
+        self._yaw = self.DEFAULT_YAW
+        self._pitch = self.DEFAULT_PITCH
+        self._distance = 3.0
+        self._game_position = np.zeros(3, dtype=np.float32)
+        self._game_target_yaw = self._yaw
+        self._game_target_pitch = self._pitch
+        self._game_move_speed = 0.0
+        self._game_velocity.fill(0.0)
+        self._pressed_keys.clear()
+        self._last_mouse_pos = None
+        self._last_move_time = time.monotonic()
+        self._orbit_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        self._move_timer.stop()
+        self.setMouseTracking(False)
+        self.unsetCursor()
+        self.colorModeChanged.emit(self._color_mode)
+        self.update()
+
     def set_color_mode(self, mode: str) -> None:
         resolved_mode = self._resolve_mode(mode)
         if resolved_mode == self._color_mode and self._cloud is not None:
@@ -3214,8 +3298,8 @@ class PointCloudGLWidget(QOpenGLWidget):
             if event.modifiers() & Qt.ShiftModifier:
                 self._apply_pan(dx, dy)
             else:
-                self._yaw += dx * 0.35
-                self._pitch += dy * 0.35
+                self._yaw -= dx * 0.35
+                self._pitch -= dy * 0.35
                 self._pitch = max(-89.0, min(89.0, self._pitch))
         elif buttons & Qt.MidButton:
             self._apply_pan(dx, dy)
@@ -3412,11 +3496,11 @@ class PointCloudGLWidget(QOpenGLWidget):
         _, right, up = self._orbit_camera_basis()
         h = max(1.0, float(self.height()))
         world_per_pixel = 2.0 * self._distance * np.tan(np.radians(self._fov_y_deg) * 0.5) / h
-        self._pan += (-dx * world_per_pixel) * right + (dy * world_per_pixel) * up
+        self._pan += (dx * world_per_pixel) * right + (-dy * world_per_pixel) * up
 
     def _apply_dolly_drag(self, dy: float) -> None:
-        # CloudCompare-like RMB drag zoom: up -> zoom in, down -> zoom out.
-        scale = pow(1.01, float(dy))
+        # Inverted RMB drag zoom: up -> zoom out, down -> zoom in.
+        scale = pow(1.01, float(-dy))
         self._distance = max(1e-3, self._distance * float(scale))
 
     def _resolve_mode(self, mode: str) -> str:
@@ -3542,7 +3626,6 @@ class MainWindow(QMainWindow):
         self._split_module = None
         self._synthetic_module = None
         self._dbscan_module = None
-        self._generated_cloud_raw: Optional[np.ndarray] = None
         self._cluster_boxes: Tuple[ClusterBoundingBoxData, ...] = ()
         self._cluster_source_path: str = ""
         self._last_generation_params = SyntheticGenerationParams()
@@ -3575,18 +3658,22 @@ class MainWindow(QMainWindow):
         return self.style().standardIcon(fallback)
 
     def _create_actions(self) -> None:
-        self.open_action = QAction(self._icon("open", QStyle.SP_DialogOpenButton), "Open File", self)
+        self.open_action = QAction(
+            self._icon("open", QStyle.SP_DialogOpenButton),
+            "Open Point Cloud File",
+            self,
+        )
         self.open_action.setShortcut("Ctrl+O")
         self.open_action.setToolTip("Open TXT or PLY point cloud")
         self.open_action.triggered.connect(self.open_file_dialog)
 
         self.open_clusters_action = QAction(
-            self.style().standardIcon(QStyle.SP_DirOpenIcon),
-            "Open Clusters YAML...",
+            self._icon("open_clusters", QStyle.SP_DirOpenIcon),
+            "Open Clusters File",
             self,
         )
-        self.open_clusters_action.setToolTip("Load a YAML file with DBSCAN cluster bounding boxes")
-        self.open_clusters_action.triggered.connect(self.open_clusters_yaml_dialog)
+        self.open_clusters_action.setToolTip("Load a clusters file with DBSCAN cluster bounding boxes")
+        self.open_clusters_action.triggered.connect(self.open_clusters_file_dialog)
 
         self.split_action = QAction(
             self._icon("split", QStyle.SP_FileDialogListView),
@@ -3614,6 +3701,17 @@ class MainWindow(QMainWindow):
         self.save_view_png_action.setToolTip("Save the current 3D view to a PNG image")
         self.save_view_png_action.setEnabled(False)
         self.save_view_png_action.triggered.connect(self.save_current_view_as_png)
+
+        self.clear_viewport_action = QAction(
+            self._icon("clear_viewport", QStyle.SP_TrashIcon),
+            "Clear Viewport",
+            self,
+        )
+        self.clear_viewport_action.setToolTip(
+            "Remove the current point cloud and any cluster bounding boxes from the viewport"
+        )
+        self.clear_viewport_action.setEnabled(False)
+        self.clear_viewport_action.triggered.connect(self.clear_viewport)
 
         self.fit_action = QAction(self._icon("fit", QStyle.SP_ArrowUp), "Fit to View", self)
         self.fit_action.setToolTip("Frame the whole cloud in the viewport")
@@ -3672,14 +3770,22 @@ class MainWindow(QMainWindow):
         self.game_navigation_action.setEnabled(False)
         self.game_navigation_action.triggered.connect(self.toggle_game_navigation_mode)
 
-        self.generate_synthetic_action = QAction(self._icon("generate_synthetic", QStyle.SP_MediaPlay), "Generate Synthetic Cloud...", self)
+        self.generate_synthetic_action = QAction(
+            self._icon("generate_synthetic", QStyle.SP_MediaPlay),
+            "Generate Exterior Synthetic Cloud...",
+            self,
+        )
         self.generate_synthetic_action.setToolTip("Generate procedural labeled point cloud")
         self.generate_synthetic_action.triggered.connect(self.generate_synthetic_cloud)
 
-        self.save_generated_ply_action = QAction(self._icon("save_generated_ply", QStyle.SP_DialogSaveButton), "Save Generated Cloud as PLY...", self)
-        self.save_generated_ply_action.setToolTip("Save the latest generated cloud to a PLY file")
-        self.save_generated_ply_action.setEnabled(False)
-        self.save_generated_ply_action.triggered.connect(self.save_generated_cloud_as_ply)
+        self.save_cloud_ply_action = QAction(
+            self._icon("save_generated_ply", QStyle.SP_DialogSaveButton),
+            "Save Cloud as PLY...",
+            self,
+        )
+        self.save_cloud_ply_action.setToolTip("Save the currently displayed point cloud to a PLY file")
+        self.save_cloud_ply_action.setEnabled(False)
+        self.save_cloud_ply_action.triggered.connect(self.save_current_cloud_as_ply)
 
         self.exit_action = QAction(self._icon("exit", QStyle.SP_DialogCloseButton), "Exit", self)
         self.exit_action.setShortcut("Ctrl+Q")
@@ -3695,16 +3801,19 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.open_clusters_action)
         file_menu.addSeparator()
+        file_menu.addAction(self.save_cloud_ply_action)
+        file_menu.addAction(self.save_view_png_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
         edit_menu = menu.addMenu("Edit")
         edit_menu.addAction(self.split_action)
         edit_menu.addAction(self.dbscan_action)
-        edit_menu.addAction(self.save_view_png_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.clear_viewport_action)
 
         generate_menu = menu.addMenu("Generate")
         generate_menu.addAction(self.generate_synthetic_action)
-        generate_menu.addAction(self.save_generated_ply_action)
 
         view_menu = menu.addMenu("View")
         view_menu.addAction(self.fit_action)
@@ -3735,10 +3844,13 @@ class MainWindow(QMainWindow):
             f"QToolButton {{ min-width: {icon_px + 10}px; min-height: {icon_px + 10}px; }}"
         )
         toolbar.addAction(self.open_action)
+        toolbar.addAction(self.open_clusters_action)
+        toolbar.addAction(self.save_cloud_ply_action)
+        toolbar.addAction(self.save_view_png_action)
         toolbar.addSeparator()
         toolbar.addAction(self.split_action)
         toolbar.addAction(self.dbscan_action)
-        toolbar.addAction(self.save_view_png_action)
+        toolbar.addAction(self.clear_viewport_action)
         toolbar.addSeparator()
         toolbar.addAction(self.fit_action)
         toolbar.addAction(self.reset_action)
@@ -3773,8 +3885,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Error", f"Unexpected error while loading file:\n{exc}")
             return
 
-        self._generated_cloud_raw = None
-        self.save_generated_ply_action.setEnabled(False)
         self._apply_cloud(cloud)
 
         if was_subsampled:
@@ -3876,6 +3986,14 @@ class MainWindow(QMainWindow):
                 return str(ensure_data_dir() / f"{stem}_view.png")
         return str(Path(self._last_view_image_dir) / "current_view.png")
 
+    def _default_cloud_export_path(self) -> str:
+        if self.current_cloud is not None and self.current_cloud.file_path:
+            stem = Path(self.current_cloud.file_path).stem.strip()
+            if stem:
+                safe_stem = re.sub(r"[\\\\/:*?\"<>|]+", "_", stem)
+                return str(ensure_data_dir() / f"{safe_stem}_export.ply")
+        return str(ensure_data_dir() / "point_cloud_export.ply")
+
     def _cluster_boxes_from_result(self, result) -> Tuple[ClusterBoundingBoxData, ...]:
         boxes: List[ClusterBoundingBoxData] = []
         for cluster in getattr(result, "clusters", ()):
@@ -3902,9 +4020,10 @@ class MainWindow(QMainWindow):
         if source_path:
             self._last_cluster_yaml_dir = str(Path(source_path).resolve().parent)
         self.gl_widget.set_cluster_boxes(self._cluster_boxes)
+        self._update_view_actions_enabled(self.current_cloud)
         self._update_status_bar()
 
-    def open_clusters_yaml_dialog(self) -> None:
+    def open_clusters_file_dialog(self) -> None:
         start_dir = self._last_cluster_yaml_dir
         if self.current_cloud is not None and self.current_cloud.file_path:
             current_path = Path(self.current_cloud.file_path)
@@ -3913,7 +4032,7 @@ class MainWindow(QMainWindow):
 
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open Cluster YAML",
+            "Open Clusters File",
             start_dir,
             "YAML Files (*.yaml *.yml);;All Files (*)",
         )
@@ -3930,7 +4049,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "Cluster Load Error",
-                f"Failed to load cluster YAML:\n{exc}",
+                f"Failed to load clusters file:\n{exc}",
             )
             return
 
@@ -3941,14 +4060,14 @@ class MainWindow(QMainWindow):
 
         cluster_count = len(self._cluster_boxes)
         self.statusBar().showMessage(
-            f"Loaded cluster YAML: {path} | Clusters: {cluster_count}",
+            f"Loaded clusters file: {path} | Clusters: {cluster_count}",
             7000,
         )
         if self.current_cloud is None:
             QMessageBox.information(
                 self,
-                "Clusters Loaded",
-                "Cluster YAML loaded. Open a point cloud to see the overlay.",
+                "Clusters File Loaded",
+                "Clusters file loaded. Open a point cloud to see the overlay.",
             )
 
     def run_dbscan_dialog(self) -> None:
@@ -4056,6 +4175,20 @@ class MainWindow(QMainWindow):
 
     def fit_to_view(self) -> None:
         self.gl_widget.fit_to_view()
+        self._update_status_bar()
+
+    def clear_viewport(self) -> None:
+        if self.current_cloud is None and not self._cluster_boxes:
+            return
+
+        self.current_cloud = None
+        self._cluster_boxes = ()
+        self._cluster_source_path = ""
+        self.gl_widget.clear_viewport()
+        self._update_view_actions_enabled(None)
+        self.split_action.setEnabled(False)
+        self.dbscan_action.setEnabled(False)
+        self.save_view_png_action.setEnabled(False)
         self._update_status_bar()
 
     def reset_view(self) -> None:
@@ -4353,32 +4486,21 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._generated_cloud_raw = np.asarray(generated_cloud, dtype=np.float64)
         self._last_generation_params = params
-        self.save_generated_ply_action.setEnabled(True)
         self._apply_cloud(cloud)
         self.statusBar().showMessage(
             f"Generated cloud loaded | Points: {cloud.loaded_count:,} | Seed: {params.seed}",
             7000,
         )
 
-    def save_generated_cloud_as_ply(self) -> None:
-        if self._generated_cloud_raw is None:
-            QMessageBox.information(self, "No Generated Cloud", "Generate a synthetic cloud first.")
+    def save_current_cloud_as_ply(self) -> None:
+        if self.current_cloud is None or self.current_cloud.loaded_count <= 0:
+            QMessageBox.information(self, "No Cloud", "Open or generate a point cloud first.")
             return
-
-        synthetic_module = self._get_synthetic_module()
-        if synthetic_module is None:
-            return
-
-        default_name = (
-            f"synthetic_seed_{self._last_generation_params.seed}_"
-            f"n_{int(self._generated_cloud_raw.shape[0])}.ply"
-        )
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Generated Cloud as PLY",
-            str(ensure_data_dir() / default_name),
+            "Save Cloud as PLY",
+            self._default_cloud_export_path(),
             "PLY Files (*.ply);;All Files (*)",
         )
         if not path:
@@ -4389,15 +4511,16 @@ class MainWindow(QMainWindow):
             out_path = out_path.with_suffix(".ply")
 
         try:
-            synthetic_module.export_to_ply(self._generated_cloud_raw, out_path)
+            export_point_cloud_data_to_ply(self.current_cloud, out_path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Save Error", f"Failed to save PLY file:\n{exc}")
             return
 
-        self.statusBar().showMessage(f"Saved generated cloud: {out_path}", 7000)
+        self.statusBar().showMessage(f"Saved point cloud: {out_path}", 7000)
 
     def _update_view_actions_enabled(self, cloud: Optional[PointCloudData]) -> None:
         has_cloud = cloud is not None and cloud.loaded_count > 0
+        has_viewport_content = has_cloud or bool(self._cluster_boxes)
         for action in (
             self.fit_action,
             self.reset_action,
@@ -4418,6 +4541,8 @@ class MainWindow(QMainWindow):
             self.game_navigation_action.blockSignals(False)
 
         self.toggle_rgb_action.setEnabled(bool(has_cloud and cloud is not None and cloud.has_rgb))
+        self.save_cloud_ply_action.setEnabled(has_cloud)
+        self.clear_viewport_action.setEnabled(has_viewport_content)
 
     def _apply_cloud(self, cloud: PointCloudData) -> None:
         self.current_cloud = cloud
