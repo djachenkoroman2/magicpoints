@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
+import yaml
 from OpenGL.GL import (
     GL_ARRAY_BUFFER,
     GL_COLOR_BUFFER_BIT,
@@ -48,11 +49,13 @@ from OpenGL.GL import (
 )
 from OpenGL.GL.shaders import compileProgram, compileShader
 from PyQt5.QtCore import QSize, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QCursor, QIcon, QKeyEvent, QMouseEvent, QSurfaceFormat, QWheelEvent
+from PyQt5.QtGui import QColor, QCursor, QIcon, QKeyEvent, QMouseEvent, QSurfaceFormat, QWheelEvent
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QCheckBox,
+    QColorDialog,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -79,11 +82,155 @@ DEFAULT_POINT_SIZE = 3.0
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / "data"
 ICONS_DIR = PROJECT_DIR / "assets" / "icons"
+SETTINGS_PATH = PROJECT_DIR / "settings.yaml"
+DEFAULT_VIEWPORT_BACKGROUND = (0.08, 0.09, 0.11)
+DEFAULT_VIEWPORT_BACKGROUND_HEX = "#14171C"
+COLOR_PRESETS: Tuple[Tuple[str, str], ...] = (
+    ("Default Dark", DEFAULT_VIEWPORT_BACKGROUND_HEX),
+    ("Black", "#000000"),
+    ("Slate Blue", "#1E2E4A"),
+    ("Deep Gray", "#2B2F36"),
+    ("Light Gray", "#D4D8DE"),
+    ("White", "#FFFFFF"),
+)
+
+
+@dataclass
+class ProjectSettings:
+    output_directory: str = "data"
+    point_size: float = DEFAULT_POINT_SIZE
+    viewport_background: str = DEFAULT_VIEWPORT_BACKGROUND_HEX
+
+
+def _clamp_point_size(value: object) -> float:
+    try:
+        point_size = float(value)
+    except (TypeError, ValueError):
+        point_size = DEFAULT_POINT_SIZE
+    return float(min(10.0, max(1.0, point_size)))
+
+
+def resolve_output_directory(path_value: str) -> Path:
+    raw = str(path_value).strip() or "data"
+    resolved = Path(raw).expanduser()
+    if not resolved.is_absolute():
+        resolved = PROJECT_DIR / resolved
+    return resolved.resolve()
+
+
+def display_output_directory(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(PROJECT_DIR).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def color_to_hex(rgb: Sequence[float]) -> str:
+    rgb_arr = np.clip(np.asarray(rgb, dtype=np.float64).reshape(3), 0.0, 1.0)
+    red, green, blue = np.rint(rgb_arr * 255.0).astype(np.uint8)
+    return f"#{int(red):02X}{int(green):02X}{int(blue):02X}"
+
+
+def parse_color_value(value: object) -> Tuple[float, float, float]:
+    if isinstance(value, (list, tuple, np.ndarray)):
+        arr = np.asarray(value, dtype=np.float64).reshape(-1)
+        if arr.size != 3:
+            raise ValueError("Color sequence must contain exactly 3 components.")
+        if np.any(~np.isfinite(arr)):
+            raise ValueError("Color values must be finite.")
+        if float(np.max(arr)) > 1.0:
+            if np.any(arr < 0.0) or np.any(arr > 255.0):
+                raise ValueError("RGB integer values must be within 0..255.")
+            arr = arr / 255.0
+        if np.any(arr < 0.0) or np.any(arr > 1.0):
+            raise ValueError("RGB float values must be within 0..1.")
+        return tuple(float(component) for component in arr[:3])
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Color value must not be empty.")
+
+    named_colors = {name.lower(): color for name, color in COLOR_PRESETS}
+    lowered = text.lower()
+    if lowered in named_colors:
+        text = named_colors[lowered]
+
+    if text.startswith("#"):
+        hex_value = text[1:]
+        if len(hex_value) == 3:
+            hex_value = "".join(ch * 2 for ch in hex_value)
+        if len(hex_value) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in hex_value):
+            raise ValueError("Hex colors must use #RGB or #RRGGBB format.")
+        return tuple(int(hex_value[i:i + 2], 16) / 255.0 for i in range(0, 6, 2))
+
+    if lowered.startswith("rgb(") and text.endswith(")"):
+        text = text[text.find("(") + 1:-1]
+
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 3:
+        raise ValueError("Color must be a preset name, #RRGGBB, rgb(r,g,b), or r,g,b.")
+
+    try:
+        values = np.asarray([float(part) for part in parts], dtype=np.float64)
+    except ValueError as exc:
+        raise ValueError("Color components must be numeric.") from exc
+
+    return parse_color_value(values)
+
+
+def normalize_color_value(value: object) -> str:
+    return color_to_hex(parse_color_value(value))
+
+
+def load_project_settings() -> ProjectSettings:
+    settings = ProjectSettings()
+    if not SETTINGS_PATH.exists():
+        return settings
+
+    try:
+        raw = yaml.safe_load(SETTINGS_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return settings
+
+    if not isinstance(raw, dict):
+        return settings
+
+    output_directory = str(raw.get("output_directory", settings.output_directory)).strip()
+    if output_directory:
+        settings.output_directory = output_directory
+
+    settings.point_size = _clamp_point_size(raw.get("point_size", settings.point_size))
+
+    try:
+        settings.viewport_background = normalize_color_value(
+            raw.get("viewport_background", settings.viewport_background)
+        )
+    except ValueError:
+        settings.viewport_background = DEFAULT_VIEWPORT_BACKGROUND_HEX
+
+    return settings
+
+
+def save_project_settings(settings: ProjectSettings) -> None:
+    payload = {
+        "output_directory": str(settings.output_directory).strip() or "data",
+        "point_size": _clamp_point_size(settings.point_size),
+        "viewport_background": normalize_color_value(settings.viewport_background),
+    }
+    SETTINGS_PATH.write_text(
+        yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+
+
+APP_SETTINGS = load_project_settings()
 
 
 def ensure_data_dir() -> Path:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return DATA_DIR
+    output_dir = resolve_output_directory(APP_SETTINGS.output_directory)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
 
 
 def normalize_field_name(name: str) -> str:
@@ -2874,6 +3021,180 @@ class SyntheticGenerationDialog(QDialog):
         )
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, settings: ProjectSettings, parent=None):
+        super().__init__(parent)
+        self._accepted_settings = ProjectSettings(
+            output_directory=str(settings.output_directory).strip() or "data",
+            point_size=_clamp_point_size(settings.point_size),
+            viewport_background=normalize_color_value(settings.viewport_background),
+        )
+
+        self.setWindowTitle("Project Settings")
+        self.resize(540, 0)
+
+        self.output_dir_edit = QLineEdit(self)
+        self.output_dir_edit.setText(self._accepted_settings.output_directory)
+
+        browse_output_button = QPushButton("Browse...", self)
+        browse_output_button.clicked.connect(self._browse_output_directory)
+
+        output_dir_row = QWidget(self)
+        output_dir_layout = QHBoxLayout(output_dir_row)
+        output_dir_layout.setContentsMargins(0, 0, 0, 0)
+        output_dir_layout.addWidget(self.output_dir_edit, 1)
+        output_dir_layout.addWidget(browse_output_button)
+
+        self.point_size_spin = QSpinBox(self)
+        self.point_size_spin.setRange(1, 10)
+        self.point_size_spin.setValue(int(round(self._accepted_settings.point_size)))
+        self.point_size_spin.setToolTip("Point size used for viewport rendering, similar to CloudCompare.")
+
+        self.background_preset_combo = QComboBox(self)
+        self.background_preset_combo.addItem("Custom", "")
+        for label, color_value in COLOR_PRESETS:
+            self.background_preset_combo.addItem(label, color_value)
+        self.background_preset_combo.currentIndexChanged.connect(self._apply_selected_preset)
+
+        self.background_edit = QLineEdit(self)
+        self.background_edit.setPlaceholderText("#14171C, rgb(20, 23, 28), or 0.08, 0.09, 0.11")
+        self.background_edit.textChanged.connect(self._update_color_preview)
+
+        choose_color_button = QPushButton("Pick Color...", self)
+        choose_color_button.clicked.connect(self._choose_color)
+
+        self.background_preview = QLabel(self)
+        self.background_preview.setFixedSize(56, 24)
+
+        background_row = QWidget(self)
+        background_layout = QHBoxLayout(background_row)
+        background_layout.setContentsMargins(0, 0, 0, 0)
+        background_layout.addWidget(self.background_preset_combo)
+        background_layout.addWidget(self.background_edit, 1)
+        background_layout.addWidget(self.background_preview)
+        background_layout.addWidget(choose_color_button)
+
+        help_label = QLabel(
+            "Background color accepts preset names, hex (#RRGGBB), rgb(r,g,b), or r,g,b values.",
+            self,
+        )
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet("color: #5a6777;")
+
+        form = QFormLayout()
+        form.addRow("Output directory:", output_dir_row)
+        form.addRow("Point size:", self.point_size_spin)
+        form.addRow("Viewport background:", background_row)
+        form.addRow("", help_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+        self.background_edit.setText(self._accepted_settings.viewport_background)
+        self._sync_preset_selection(self._accepted_settings.viewport_background)
+        self._update_color_preview()
+
+    def settings(self) -> ProjectSettings:
+        return ProjectSettings(
+            output_directory=self._accepted_settings.output_directory,
+            point_size=self._accepted_settings.point_size,
+            viewport_background=self._accepted_settings.viewport_background,
+        )
+
+    def _browse_output_directory(self) -> None:
+        start_dir = resolve_output_directory(self.output_dir_edit.text())
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Directory",
+            str(start_dir),
+        )
+        if selected:
+            self.output_dir_edit.setText(display_output_directory(Path(selected)))
+
+    def _apply_selected_preset(self, _index: int) -> None:
+        preset_value = self.background_preset_combo.currentData()
+        if preset_value:
+            self.background_edit.setText(str(preset_value))
+
+    def _choose_color(self) -> None:
+        initial = QColor(self.background_edit.text().strip())
+        if not initial.isValid():
+            try:
+                initial = QColor(normalize_color_value(self.background_edit.text()))
+            except ValueError:
+                initial = QColor(DEFAULT_VIEWPORT_BACKGROUND_HEX)
+
+        selected = QColorDialog.getColor(initial, self, "Select Viewport Background Color")
+        if selected.isValid():
+            self.background_edit.setText(selected.name().upper())
+
+    def _sync_preset_selection(self, color_value: str) -> None:
+        normalized = normalize_color_value(color_value)
+        target_index = 0
+        for index in range(1, self.background_preset_combo.count()):
+            if str(self.background_preset_combo.itemData(index)).upper() == normalized:
+                target_index = index
+                break
+        self.background_preset_combo.blockSignals(True)
+        self.background_preset_combo.setCurrentIndex(target_index)
+        self.background_preset_combo.blockSignals(False)
+
+    def _update_color_preview(self) -> None:
+        text = self.background_edit.text().strip()
+        try:
+            normalized = normalize_color_value(text)
+        except ValueError:
+            self.background_preview.setStyleSheet(
+                "border: 1px solid #C44A4A; background-color: #F4D7D7;"
+            )
+            self.background_edit.setStyleSheet("border: 1px solid #C44A4A;")
+            self.background_preset_combo.blockSignals(True)
+            self.background_preset_combo.setCurrentIndex(0)
+            self.background_preset_combo.blockSignals(False)
+            return
+
+        self.background_preview.setStyleSheet(
+            f"border: 1px solid #768397; background-color: {normalized};"
+        )
+        self.background_edit.setStyleSheet("")
+        self._sync_preset_selection(normalized)
+
+    def accept(self) -> None:
+        output_directory = self.output_dir_edit.text().strip()
+        if not output_directory:
+            QMessageBox.warning(self, "Invalid Settings", "Output directory must not be empty.")
+            return
+
+        try:
+            resolved_output_dir = resolve_output_directory(output_directory)
+            resolved_output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "Invalid Settings",
+                f"Failed to create or access the output directory:\n{exc}",
+            )
+            return
+
+        try:
+            normalized_color = normalize_color_value(self.background_edit.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid Settings", f"Invalid viewport background color:\n{exc}")
+            return
+
+        self._accepted_settings = ProjectSettings(
+            output_directory=display_output_directory(resolved_output_dir),
+            point_size=float(self.point_size_spin.value()),
+            viewport_background=normalized_color,
+        )
+        super().accept()
+
+
 class PointCloudGLWidget(QOpenGLWidget):
     colorModeChanged = pyqtSignal(str)
     navigationModeChanged = pyqtSignal(str)
@@ -2895,7 +3216,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._cloud: Optional[PointCloudData] = None
         self._cluster_boxes: Tuple[ClusterBoundingBoxData, ...] = ()
         self._color_mode: str = "neutral"
-        self._background = (0.08, 0.09, 0.11)
+        self._background = parse_color_value(APP_SETTINGS.viewport_background)
         self._neutral_color = np.array([0.82, 0.84, 0.88], dtype=np.float32)
 
         self._program: int = 0
@@ -2937,7 +3258,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._move_timer = QTimer(self)
         self._move_timer.setInterval(16)
         self._move_timer.timeout.connect(self._update_game_movement)
-        self._point_size = DEFAULT_POINT_SIZE
+        self._point_size = _clamp_point_size(APP_SETTINGS.point_size)
 
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(False)
@@ -2959,6 +3280,14 @@ class PointCloudGLWidget(QOpenGLWidget):
 
     def active_navigation_mode_label(self) -> str:
         return self.NAVIGATION_MODE_LABELS.get(self._navigation_mode, "Unknown")
+
+    def set_point_size(self, point_size: float) -> None:
+        self._point_size = _clamp_point_size(point_size)
+        self.update()
+
+    def set_background_color(self, color: Sequence[float]) -> None:
+        self._background = parse_color_value(color)
+        self.update()
 
     def set_game_navigation_enabled(self, enabled: bool) -> None:
         next_mode = "game" if enabled else "orbit"
@@ -3622,6 +3951,11 @@ class MainWindow(QMainWindow):
     def __init__(self, max_points: int = DEFAULT_MAX_POINTS):
         super().__init__()
         self.max_points = max_points
+        self._settings = ProjectSettings(
+            output_directory=APP_SETTINGS.output_directory,
+            point_size=APP_SETTINGS.point_size,
+            viewport_background=APP_SETTINGS.viewport_background,
+        )
         self.current_cloud: Optional[PointCloudData] = None
         self._split_module = None
         self._synthetic_module = None
@@ -3646,6 +3980,8 @@ class MainWindow(QMainWindow):
         self.gl_widget.colorModeChanged.connect(self._on_color_mode_changed)
         self.gl_widget.navigationModeChanged.connect(self._on_navigation_mode_changed)
 
+        self._ensure_settings_file_exists()
+        self._apply_project_settings(self._settings, persist=False, update_recent_paths=False)
         self._create_actions()
         self._create_menus()
         self._create_toolbar()
@@ -3674,6 +4010,14 @@ class MainWindow(QMainWindow):
         )
         self.open_clusters_action.setToolTip("Load a clusters file with DBSCAN cluster bounding boxes")
         self.open_clusters_action.triggered.connect(self.open_clusters_file_dialog)
+
+        self.settings_action = QAction(
+            self.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+            "Settings",
+            self,
+        )
+        self.settings_action.setToolTip("Open project settings")
+        self.settings_action.triggered.connect(self.open_settings_dialog)
 
         self.split_action = QAction(
             self._icon("split", QStyle.SP_FileDialogListView),
@@ -3804,6 +4148,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_cloud_ply_action)
         file_menu.addAction(self.save_view_png_action)
         file_menu.addSeparator()
+        file_menu.addAction(self.settings_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
         edit_menu = menu.addMenu("Edit")
@@ -3864,6 +4210,67 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.game_navigation_action)
         toolbar.addAction(self.toggle_rgb_action)
         self.addToolBar(toolbar)
+
+    def _ensure_settings_file_exists(self) -> None:
+        if SETTINGS_PATH.exists():
+            return
+        try:
+            save_project_settings(self._settings)
+        except Exception:
+            return
+
+    def _apply_project_settings(
+        self,
+        settings: ProjectSettings,
+        *,
+        persist: bool,
+        update_recent_paths: bool,
+    ) -> None:
+        normalized = ProjectSettings(
+            output_directory=display_output_directory(resolve_output_directory(settings.output_directory)),
+            point_size=_clamp_point_size(settings.point_size),
+            viewport_background=normalize_color_value(settings.viewport_background),
+        )
+
+        self._settings = normalized
+        APP_SETTINGS.output_directory = normalized.output_directory
+        APP_SETTINGS.point_size = normalized.point_size
+        APP_SETTINGS.viewport_background = normalized.viewport_background
+
+        output_dir = ensure_data_dir()
+        if update_recent_paths:
+            self._last_split_dir = str(output_dir)
+            dbscan_name = Path(self._last_dbscan_output_path).name if self._last_dbscan_output_path else "dbscan_clusters.yaml"
+            if Path(dbscan_name).suffix.lower() not in {".yaml", ".yml"}:
+                dbscan_name = Path(dbscan_name).with_suffix(".yaml").name
+            self._last_dbscan_output_path = str(output_dir / dbscan_name)
+            self._last_cluster_yaml_dir = str(output_dir)
+            self._last_view_image_dir = str(output_dir)
+
+        self.gl_widget.set_point_size(normalized.point_size)
+        self.gl_widget.set_background_color(parse_color_value(normalized.viewport_background))
+
+        if persist:
+            save_project_settings(normalized)
+
+        self._update_status_bar()
+
+    def open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self._settings, parent=self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        try:
+            self._apply_project_settings(
+                dialog.settings(),
+                persist=True,
+                update_recent_paths=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Settings Error", f"Failed to apply project settings:\n{exc}")
+            return
+
+        self.statusBar().showMessage(f"Settings saved to {SETTINGS_PATH}", 5000)
 
     def open_file_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

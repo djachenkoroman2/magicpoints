@@ -1,0 +1,3 @@
+output_directory: data
+point_size: 3.0
+viewport_background: '#2B2F36'
