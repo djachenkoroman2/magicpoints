@@ -363,14 +363,15 @@ class PointCloudData:
     def center(self) -> np.ndarray:
         if self.points.size == 0:
             return np.zeros(3, dtype=np.float32)
-        return np.mean(self.points, axis=0).astype(np.float32)
+        # Use float64 accumulation so large world coordinates do not skew the camera target.
+        return np.mean(self.points, axis=0, dtype=np.float64).astype(np.float32)
 
     @property
     def radius(self) -> float:
         if self.points.size == 0:
             return 1.0
-        mins = np.min(self.points, axis=0)
-        maxs = np.max(self.points, axis=0)
+        mins = np.min(self.points, axis=0).astype(np.float64, copy=False)
+        maxs = np.max(self.points, axis=0).astype(np.float64, copy=False)
         return max(1e-4, float(np.linalg.norm(maxs - mins) * 0.5))
 
     def subset(self, indices: np.ndarray) -> "PointCloudData":
