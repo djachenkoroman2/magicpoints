@@ -4493,6 +4493,8 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
 
         file_menu = menu.addMenu("File")
+        file_menu.addAction(self.clear_viewport_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.open_clusters_action)
         file_menu.addSeparator()
@@ -4503,11 +4505,9 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
-        edit_menu = menu.addMenu("Edit")
+        edit_menu = menu.addMenu("Tools")
         edit_menu.addAction(self.split_action)
         edit_menu.addAction(self.dbscan_action)
-        edit_menu.addSeparator()
-        edit_menu.addAction(self.clear_viewport_action)
 
         generate_menu = menu.addMenu("Generate")
         generate_menu.addAction(self.generate_synthetic_action)

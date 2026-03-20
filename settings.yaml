@@ -4,4 +4,4 @@ viewport_background: '#000000'
 bounding_box_color_mode: single
 bounding_box_color: '#AA55FF'
 bounding_box_line_width: 3.0
-bounding_box_show_id: false
+bounding_box_show_id: true

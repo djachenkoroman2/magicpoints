@@ -33,12 +33,12 @@
 - режим `Game Navigation Mode` с управлением `WASD` + мышь.
 
 ### Работа с размеченными облаками
-- Команда `Edit -> Split...` делит текущее облако по значениям `label`.
+- Команда `Tools -> Split...` делит текущее облако по значениям `label`.
 - Для каждого класса сохраняется отдельный `PLY`-файл.
 - Команда доступна только если в облаке есть поле метки.
 
 ### DBSCAN и кластеры
-- Команда `Edit -> DBSCAN...` запускает кластеризацию текущего облака.
+- Команда `Tools -> DBSCAN...` запускает кластеризацию текущего облака.
 - Параметры `epsilon`, `MinPts` и путь к выходному YAML задаются в отдельном диалоге.
 - Результат сохраняется в YAML-файл.
 - Для каждого кластера сохраняются:
@@ -48,7 +48,7 @@
   - `bounding_box.max`.
 - После выполнения bounding boxes автоматически накладываются поверх текущего облака.
 - Команда `File -> Open Clusters File` позволяет отдельно загрузить YAML-файл с кластерами и отобразить его как overlay.
-- Команда `Edit -> Clear Viewport` полностью очищает viewport: удаляет текущее облако и все загруженные bounding boxes.
+- Команда `File -> Clear Viewport` полностью очищает viewport: удаляет текущее облако и все загруженные bounding boxes.
 
 ### Генерация синтетических облаков
 - Команда `Generate -> Generate Exterior Synthetic Cloud...` открывает диалог с параметрами генерации.
@@ -67,16 +67,16 @@
 
 ## Структура интерфейса
 - `File`
+  - `Clear Viewport`
   - `Open Point Cloud File`
   - `Open Clusters File`
   - `Save Cloud as PLY...`
   - `Save View as PNG...`
   - `Settings`
   - `Exit`
-- `Edit`
+- `Tools`
   - `Split...`
   - `DBSCAN...`
-  - `Clear Viewport`
 - `Generate`
   - `Generate Exterior Synthetic Cloud...`
 - `View`
