@@ -48,8 +48,8 @@ from OpenGL.GL import (
     glViewport,
 )
 from OpenGL.GL.shaders import compileProgram, compileShader
-from PyQt5.QtCore import QSize, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QIcon, QKeyEvent, QMouseEvent, QSurfaceFormat, QWheelEvent
+from PyQt5.QtCore import QRectF, QSize, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QCursor, QIcon, QKeyEvent, QMouseEvent, QPainter, QSurfaceFormat, QWheelEvent
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -93,6 +93,21 @@ COLOR_PRESETS: Tuple[Tuple[str, str], ...] = (
     ("Light Gray", "#D4D8DE"),
     ("White", "#FFFFFF"),
 )
+DEFAULT_BOUNDING_BOX_COLOR_MODE = "random"
+DEFAULT_BOUNDING_BOX_COLOR_HEX = "#FFB347"
+DEFAULT_BOUNDING_BOX_LINE_WIDTH = 2.0
+BOX_COLOR_PRESETS: Tuple[Tuple[str, str], ...] = (
+    ("Amber", DEFAULT_BOUNDING_BOX_COLOR_HEX),
+    ("Lime", "#8BD450"),
+    ("Cyan", "#4ED8E6"),
+    ("Sky Blue", "#4FA3FF"),
+    ("Magenta", "#FF5CA8"),
+    ("Red", "#FF5A52"),
+    ("White", "#FFFFFF"),
+    ("Black", "#000000"),
+)
+BOUNDING_BOX_COLOR_MODES = {"random", "single"}
+NAMED_COLOR_PRESETS: Tuple[Tuple[str, str], ...] = COLOR_PRESETS + BOX_COLOR_PRESETS
 
 
 @dataclass
@@ -100,6 +115,10 @@ class ProjectSettings:
     output_directory: str = "data"
     point_size: float = DEFAULT_POINT_SIZE
     viewport_background: str = DEFAULT_VIEWPORT_BACKGROUND_HEX
+    bounding_box_color_mode: str = DEFAULT_BOUNDING_BOX_COLOR_MODE
+    bounding_box_color: str = DEFAULT_BOUNDING_BOX_COLOR_HEX
+    bounding_box_line_width: float = DEFAULT_BOUNDING_BOX_LINE_WIDTH
+    bounding_box_show_id: bool = False
 
 
 def _clamp_point_size(value: object) -> float:
@@ -108,6 +127,35 @@ def _clamp_point_size(value: object) -> float:
     except (TypeError, ValueError):
         point_size = DEFAULT_POINT_SIZE
     return float(min(10.0, max(1.0, point_size)))
+
+
+def _clamp_bounding_box_line_width(value: object) -> float:
+    try:
+        line_width = float(value)
+    except (TypeError, ValueError):
+        line_width = DEFAULT_BOUNDING_BOX_LINE_WIDTH
+    return float(min(10.0, max(1.0, line_width)))
+
+
+def _normalize_bounding_box_color_mode(value: object) -> str:
+    mode = str(value).strip().lower()
+    if mode in BOUNDING_BOX_COLOR_MODES:
+        return mode
+    return DEFAULT_BOUNDING_BOX_COLOR_MODE
+
+
+def _coerce_bool_setting(value: object, default: bool = False) -> bool:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)
 
 
 def resolve_output_directory(path_value: str) -> Path:
@@ -151,7 +199,7 @@ def parse_color_value(value: object) -> Tuple[float, float, float]:
     if not text:
         raise ValueError("Color value must not be empty.")
 
-    named_colors = {name.lower(): color for name, color in COLOR_PRESETS}
+    named_colors = {name.lower(): color for name, color in NAMED_COLOR_PRESETS}
     lowered = text.lower()
     if lowered in named_colors:
         text = named_colors[lowered]
@@ -209,6 +257,23 @@ def load_project_settings() -> ProjectSettings:
     except ValueError:
         settings.viewport_background = DEFAULT_VIEWPORT_BACKGROUND_HEX
 
+    settings.bounding_box_color_mode = _normalize_bounding_box_color_mode(
+        raw.get("bounding_box_color_mode", settings.bounding_box_color_mode)
+    )
+    try:
+        settings.bounding_box_color = normalize_color_value(
+            raw.get("bounding_box_color", settings.bounding_box_color)
+        )
+    except ValueError:
+        settings.bounding_box_color = DEFAULT_BOUNDING_BOX_COLOR_HEX
+    settings.bounding_box_line_width = _clamp_bounding_box_line_width(
+        raw.get("bounding_box_line_width", settings.bounding_box_line_width)
+    )
+    settings.bounding_box_show_id = _coerce_bool_setting(
+        raw.get("bounding_box_show_id", settings.bounding_box_show_id),
+        default=settings.bounding_box_show_id,
+    )
+
     return settings
 
 
@@ -217,6 +282,10 @@ def save_project_settings(settings: ProjectSettings) -> None:
         "output_directory": str(settings.output_directory).strip() or "data",
         "point_size": _clamp_point_size(settings.point_size),
         "viewport_background": normalize_color_value(settings.viewport_background),
+        "bounding_box_color_mode": _normalize_bounding_box_color_mode(settings.bounding_box_color_mode),
+        "bounding_box_color": normalize_color_value(settings.bounding_box_color),
+        "bounding_box_line_width": _clamp_bounding_box_line_width(settings.bounding_box_line_width),
+        "bounding_box_show_id": bool(settings.bounding_box_show_id),
     }
     SETTINGS_PATH.write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
@@ -3029,10 +3098,16 @@ class SettingsDialog(QDialog):
             output_directory=str(settings.output_directory).strip() or "data",
             point_size=_clamp_point_size(settings.point_size),
             viewport_background=normalize_color_value(settings.viewport_background),
+            bounding_box_color_mode=_normalize_bounding_box_color_mode(settings.bounding_box_color_mode),
+            bounding_box_color=normalize_color_value(settings.bounding_box_color),
+            bounding_box_line_width=_clamp_bounding_box_line_width(settings.bounding_box_line_width),
+            bounding_box_show_id=bool(settings.bounding_box_show_id),
         )
 
         self.setWindowTitle("Project Settings")
-        self.resize(540, 0)
+        self.resize(640, 0)
+
+        self.tabs = QTabWidget(self)
 
         self.output_dir_edit = QLineEdit(self)
         self.output_dir_edit.setText(self._accepted_settings.output_directory)
@@ -3055,14 +3130,14 @@ class SettingsDialog(QDialog):
         self.background_preset_combo.addItem("Custom", "")
         for label, color_value in COLOR_PRESETS:
             self.background_preset_combo.addItem(label, color_value)
-        self.background_preset_combo.currentIndexChanged.connect(self._apply_selected_preset)
+        self.background_preset_combo.currentIndexChanged.connect(self._apply_selected_background_preset)
 
         self.background_edit = QLineEdit(self)
         self.background_edit.setPlaceholderText("#14171C, rgb(20, 23, 28), or 0.08, 0.09, 0.11")
-        self.background_edit.textChanged.connect(self._update_color_preview)
+        self.background_edit.textChanged.connect(self._update_background_color_preview)
 
-        choose_color_button = QPushButton("Pick Color...", self)
-        choose_color_button.clicked.connect(self._choose_color)
+        self.background_pick_color_button = QPushButton("Pick Color...", self)
+        self.background_pick_color_button.clicked.connect(self._choose_background_color)
 
         self.background_preview = QLabel(self)
         self.background_preview.setFixedSize(56, 24)
@@ -3073,38 +3148,116 @@ class SettingsDialog(QDialog):
         background_layout.addWidget(self.background_preset_combo)
         background_layout.addWidget(self.background_edit, 1)
         background_layout.addWidget(self.background_preview)
-        background_layout.addWidget(choose_color_button)
+        background_layout.addWidget(self.background_pick_color_button)
 
-        help_label = QLabel(
+        background_help_label = QLabel(
             "Background color accepts preset names, hex (#RRGGBB), rgb(r,g,b), or r,g,b values.",
             self,
         )
-        help_label.setWordWrap(True)
-        help_label.setStyleSheet("color: #5a6777;")
+        background_help_label.setWordWrap(True)
+        background_help_label.setStyleSheet("color: #5a6777;")
 
-        form = QFormLayout()
-        form.addRow("Output directory:", output_dir_row)
-        form.addRow("Point size:", self.point_size_spin)
-        form.addRow("Viewport background:", background_row)
-        form.addRow("", help_label)
+        general_form = QFormLayout()
+        general_form.addRow("Output directory:", output_dir_row)
+        general_form.addRow("Point size:", self.point_size_spin)
+        general_form.addRow("Viewport background:", background_row)
+        general_form.addRow("", background_help_label)
+
+        general_tab = QWidget(self)
+        general_layout = QVBoxLayout(general_tab)
+        general_layout.setContentsMargins(0, 0, 0, 0)
+        general_layout.addLayout(general_form)
+        general_layout.addStretch(1)
+
+        self.bounding_box_color_mode_combo = QComboBox(self)
+        self.bounding_box_color_mode_combo.addItem("Random per box", "random")
+        self.bounding_box_color_mode_combo.addItem("Single color", "single")
+        self.bounding_box_color_mode_combo.currentIndexChanged.connect(self._update_bounding_box_color_mode_state)
+
+        self.bounding_box_preset_combo = QComboBox(self)
+        self.bounding_box_preset_combo.addItem("Custom", "")
+        for label, color_value in BOX_COLOR_PRESETS:
+            self.bounding_box_preset_combo.addItem(label, color_value)
+        self.bounding_box_preset_combo.currentIndexChanged.connect(self._apply_selected_bounding_box_preset)
+
+        self.bounding_box_color_edit = QLineEdit(self)
+        self.bounding_box_color_edit.setPlaceholderText("#FFB347, rgb(255, 179, 71), or 1.0, 0.7, 0.28")
+        self.bounding_box_color_edit.textChanged.connect(self._update_bounding_box_color_preview)
+
+        self.bounding_box_pick_color_button = QPushButton("Pick Color...", self)
+        self.bounding_box_pick_color_button.clicked.connect(self._choose_bounding_box_color)
+
+        self.bounding_box_color_preview = QLabel(self)
+        self.bounding_box_color_preview.setFixedSize(56, 24)
+
+        bounding_box_color_row = QWidget(self)
+        bounding_box_color_layout = QHBoxLayout(bounding_box_color_row)
+        bounding_box_color_layout.setContentsMargins(0, 0, 0, 0)
+        bounding_box_color_layout.addWidget(self.bounding_box_preset_combo)
+        bounding_box_color_layout.addWidget(self.bounding_box_color_edit, 1)
+        bounding_box_color_layout.addWidget(self.bounding_box_color_preview)
+        bounding_box_color_layout.addWidget(self.bounding_box_pick_color_button)
+
+        self.bounding_box_line_width_spin = QDoubleSpinBox(self)
+        self.bounding_box_line_width_spin.setDecimals(1)
+        self.bounding_box_line_width_spin.setRange(1.0, 10.0)
+        self.bounding_box_line_width_spin.setSingleStep(0.5)
+        self.bounding_box_line_width_spin.setValue(self._accepted_settings.bounding_box_line_width)
+        self.bounding_box_line_width_spin.setToolTip("Line width used when drawing cluster bounding boxes.")
+
+        self.bounding_box_show_id_check = QCheckBox("Display near each box", self)
+        self.bounding_box_show_id_check.setChecked(bool(self._accepted_settings.bounding_box_show_id))
+
+        bounding_box_help_label = QLabel(
+            "Random mode assigns a distinct color to each box. Single color accepts preset names, hex (#RRGGBB), rgb(r,g,b), or r,g,b values.",
+            self,
+        )
+        bounding_box_help_label.setWordWrap(True)
+        bounding_box_help_label.setStyleSheet("color: #5a6777;")
+
+        bounding_box_form = QFormLayout()
+        bounding_box_form.addRow("Color mode:", self.bounding_box_color_mode_combo)
+        bounding_box_form.addRow("Box color:", bounding_box_color_row)
+        bounding_box_form.addRow("Line width:", self.bounding_box_line_width_spin)
+        bounding_box_form.addRow("Cluster ID:", self.bounding_box_show_id_check)
+        bounding_box_form.addRow("", bounding_box_help_label)
+
+        bounding_box_tab = QWidget(self)
+        bounding_box_layout = QVBoxLayout(bounding_box_tab)
+        bounding_box_layout.setContentsMargins(0, 0, 0, 0)
+        bounding_box_layout.addLayout(bounding_box_form)
+        bounding_box_layout.addStretch(1)
+
+        self.tabs.addTab(general_tab, "General")
+        self.tabs.addTab(bounding_box_tab, "Bounding Boxes")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(self.tabs)
         layout.addWidget(buttons)
 
         self.background_edit.setText(self._accepted_settings.viewport_background)
-        self._sync_preset_selection(self._accepted_settings.viewport_background)
-        self._update_color_preview()
+        self._sync_background_preset_selection(self._accepted_settings.viewport_background)
+        self._update_background_color_preview()
+
+        self._set_bounding_box_color_mode(self._accepted_settings.bounding_box_color_mode)
+        self.bounding_box_color_edit.setText(self._accepted_settings.bounding_box_color)
+        self._sync_bounding_box_preset_selection(self._accepted_settings.bounding_box_color)
+        self._update_bounding_box_color_preview()
+        self._update_bounding_box_color_mode_state()
 
     def settings(self) -> ProjectSettings:
         return ProjectSettings(
             output_directory=self._accepted_settings.output_directory,
             point_size=self._accepted_settings.point_size,
             viewport_background=self._accepted_settings.viewport_background,
+            bounding_box_color_mode=self._accepted_settings.bounding_box_color_mode,
+            bounding_box_color=self._accepted_settings.bounding_box_color,
+            bounding_box_line_width=self._accepted_settings.bounding_box_line_width,
+            bounding_box_show_id=self._accepted_settings.bounding_box_show_id,
         )
 
     def _browse_output_directory(self) -> None:
@@ -3117,12 +3270,12 @@ class SettingsDialog(QDialog):
         if selected:
             self.output_dir_edit.setText(display_output_directory(Path(selected)))
 
-    def _apply_selected_preset(self, _index: int) -> None:
+    def _apply_selected_background_preset(self, _index: int) -> None:
         preset_value = self.background_preset_combo.currentData()
         if preset_value:
             self.background_edit.setText(str(preset_value))
 
-    def _choose_color(self) -> None:
+    def _choose_background_color(self) -> None:
         initial = QColor(self.background_edit.text().strip())
         if not initial.isValid():
             try:
@@ -3134,7 +3287,7 @@ class SettingsDialog(QDialog):
         if selected.isValid():
             self.background_edit.setText(selected.name().upper())
 
-    def _sync_preset_selection(self, color_value: str) -> None:
+    def _sync_background_preset_selection(self, color_value: str) -> None:
         normalized = normalize_color_value(color_value)
         target_index = 0
         for index in range(1, self.background_preset_combo.count()):
@@ -3145,7 +3298,7 @@ class SettingsDialog(QDialog):
         self.background_preset_combo.setCurrentIndex(target_index)
         self.background_preset_combo.blockSignals(False)
 
-    def _update_color_preview(self) -> None:
+    def _update_background_color_preview(self) -> None:
         text = self.background_edit.text().strip()
         try:
             normalized = normalize_color_value(text)
@@ -3163,11 +3316,81 @@ class SettingsDialog(QDialog):
             f"border: 1px solid #768397; background-color: {normalized};"
         )
         self.background_edit.setStyleSheet("")
-        self._sync_preset_selection(normalized)
+        self._sync_background_preset_selection(normalized)
+
+    def _selected_bounding_box_color_mode(self) -> str:
+        return _normalize_bounding_box_color_mode(self.bounding_box_color_mode_combo.currentData())
+
+    def _set_bounding_box_color_mode(self, mode: str) -> None:
+        normalized = _normalize_bounding_box_color_mode(mode)
+        target_index = 0
+        for index in range(self.bounding_box_color_mode_combo.count()):
+            if self.bounding_box_color_mode_combo.itemData(index) == normalized:
+                target_index = index
+                break
+        self.bounding_box_color_mode_combo.blockSignals(True)
+        self.bounding_box_color_mode_combo.setCurrentIndex(target_index)
+        self.bounding_box_color_mode_combo.blockSignals(False)
+
+    def _apply_selected_bounding_box_preset(self, _index: int) -> None:
+        preset_value = self.bounding_box_preset_combo.currentData()
+        if preset_value:
+            self.bounding_box_color_edit.setText(str(preset_value))
+
+    def _choose_bounding_box_color(self) -> None:
+        initial = QColor(self.bounding_box_color_edit.text().strip())
+        if not initial.isValid():
+            try:
+                initial = QColor(normalize_color_value(self.bounding_box_color_edit.text()))
+            except ValueError:
+                initial = QColor(DEFAULT_BOUNDING_BOX_COLOR_HEX)
+
+        selected = QColorDialog.getColor(initial, self, "Select Bounding Box Color")
+        if selected.isValid():
+            self.bounding_box_color_edit.setText(selected.name().upper())
+
+    def _sync_bounding_box_preset_selection(self, color_value: str) -> None:
+        normalized = normalize_color_value(color_value)
+        target_index = 0
+        for index in range(1, self.bounding_box_preset_combo.count()):
+            if str(self.bounding_box_preset_combo.itemData(index)).upper() == normalized:
+                target_index = index
+                break
+        self.bounding_box_preset_combo.blockSignals(True)
+        self.bounding_box_preset_combo.setCurrentIndex(target_index)
+        self.bounding_box_preset_combo.blockSignals(False)
+
+    def _update_bounding_box_color_preview(self) -> None:
+        text = self.bounding_box_color_edit.text().strip()
+        try:
+            normalized = normalize_color_value(text)
+        except ValueError:
+            self.bounding_box_color_preview.setStyleSheet(
+                "border: 1px solid #C44A4A; background-color: #F4D7D7;"
+            )
+            self.bounding_box_color_edit.setStyleSheet("border: 1px solid #C44A4A;")
+            self.bounding_box_preset_combo.blockSignals(True)
+            self.bounding_box_preset_combo.setCurrentIndex(0)
+            self.bounding_box_preset_combo.blockSignals(False)
+            return
+
+        self.bounding_box_color_preview.setStyleSheet(
+            f"border: 1px solid #768397; background-color: {normalized};"
+        )
+        self.bounding_box_color_edit.setStyleSheet("")
+        self._sync_bounding_box_preset_selection(normalized)
+
+    def _update_bounding_box_color_mode_state(self) -> None:
+        single_color_mode = self._selected_bounding_box_color_mode() == "single"
+        self.bounding_box_preset_combo.setEnabled(single_color_mode)
+        self.bounding_box_color_edit.setEnabled(single_color_mode)
+        self.bounding_box_color_preview.setEnabled(single_color_mode)
+        self.bounding_box_pick_color_button.setEnabled(single_color_mode)
 
     def accept(self) -> None:
         output_directory = self.output_dir_edit.text().strip()
         if not output_directory:
+            self.tabs.setCurrentIndex(0)
             QMessageBox.warning(self, "Invalid Settings", "Output directory must not be empty.")
             return
 
@@ -3175,6 +3398,7 @@ class SettingsDialog(QDialog):
             resolved_output_dir = resolve_output_directory(output_directory)
             resolved_output_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:  # noqa: BLE001
+            self.tabs.setCurrentIndex(0)
             QMessageBox.warning(
                 self,
                 "Invalid Settings",
@@ -3183,15 +3407,29 @@ class SettingsDialog(QDialog):
             return
 
         try:
-            normalized_color = normalize_color_value(self.background_edit.text())
+            normalized_background = normalize_color_value(self.background_edit.text())
         except ValueError as exc:
+            self.tabs.setCurrentIndex(0)
             QMessageBox.warning(self, "Invalid Settings", f"Invalid viewport background color:\n{exc}")
+            return
+
+        try:
+            normalized_bounding_box_color = normalize_color_value(
+                self.bounding_box_color_edit.text() or self._accepted_settings.bounding_box_color
+            )
+        except ValueError as exc:
+            self.tabs.setCurrentIndex(1)
+            QMessageBox.warning(self, "Invalid Settings", f"Invalid bounding box color:\n{exc}")
             return
 
         self._accepted_settings = ProjectSettings(
             output_directory=display_output_directory(resolved_output_dir),
             point_size=float(self.point_size_spin.value()),
-            viewport_background=normalized_color,
+            viewport_background=normalized_background,
+            bounding_box_color_mode=self._selected_bounding_box_color_mode(),
+            bounding_box_color=normalized_bounding_box_color,
+            bounding_box_line_width=_clamp_bounding_box_line_width(self.bounding_box_line_width_spin.value()),
+            bounding_box_show_id=bool(self.bounding_box_show_id_check.isChecked()),
         )
         super().accept()
 
@@ -3219,6 +3457,12 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._color_mode: str = "neutral"
         self._background = parse_color_value(APP_SETTINGS.viewport_background)
         self._neutral_color = np.array([0.82, 0.84, 0.88], dtype=np.float32)
+        self._cluster_box_color_mode = _normalize_bounding_box_color_mode(
+            APP_SETTINGS.bounding_box_color_mode
+        )
+        self._cluster_box_color = normalize_color_value(APP_SETTINGS.bounding_box_color)
+        self._cluster_box_show_id = bool(APP_SETTINGS.bounding_box_show_id)
+        self._overlay_box_colors = np.zeros((0, 3), dtype=np.float32)
 
         self._program: int = 0
         self._vbo_points: int = 0
@@ -3232,7 +3476,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._initialized = False
         self._point_count = 0
         self._overlay_vertex_count = 0
-        self._overlay_line_width = 2.0
+        self._overlay_line_width = _clamp_bounding_box_line_width(APP_SETTINGS.bounding_box_line_width)
 
         self._fov_y_deg = 50.0
         self._scene_center = np.zeros(3, dtype=np.float32)
@@ -3289,6 +3533,39 @@ class PointCloudGLWidget(QOpenGLWidget):
     def set_background_color(self, color: Sequence[float]) -> None:
         self._background = parse_color_value(color)
         self.update()
+
+    def set_cluster_box_display_settings(
+        self,
+        *,
+        color_mode: str,
+        color: object,
+        line_width: float,
+        show_id: bool,
+    ) -> None:
+        normalized_mode = _normalize_bounding_box_color_mode(color_mode)
+        normalized_color = normalize_color_value(color)
+        normalized_line_width = _clamp_bounding_box_line_width(line_width)
+        normalized_show_id = bool(show_id)
+
+        overlay_colors_changed = (
+            normalized_mode != self._cluster_box_color_mode
+            or normalized_color != self._cluster_box_color
+        )
+        display_changed = (
+            overlay_colors_changed
+            or normalized_line_width != self._overlay_line_width
+            or normalized_show_id != self._cluster_box_show_id
+        )
+
+        self._cluster_box_color_mode = normalized_mode
+        self._cluster_box_color = normalized_color
+        self._overlay_line_width = normalized_line_width
+        self._cluster_box_show_id = normalized_show_id
+
+        if overlay_colors_changed and self._initialized:
+            self._upload_cluster_overlay()
+        if display_changed:
+            self.update()
 
     def set_game_navigation_enabled(self, enabled: bool) -> None:
         next_mode = "game" if enabled else "orbit"
@@ -3378,6 +3655,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._cluster_boxes = ()
         self._point_count = 0
         self._overlay_vertex_count = 0
+        self._overlay_box_colors = np.zeros((0, 3), dtype=np.float32)
         self._color_mode = "neutral"
         self._scene_center = np.zeros(3, dtype=np.float32)
         self._scene_radius = 1.0
@@ -3581,6 +3859,7 @@ class PointCloudGLWidget(QOpenGLWidget):
             glEnable(GL_DEPTH_TEST)
 
         glUseProgram(0)
+        self._paint_cluster_box_labels(mvp)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self._last_mouse_pos = event.pos()
@@ -3869,6 +4148,71 @@ class PointCloudGLWidget(QOpenGLWidget):
         distance = radius / np.sin(min_half_fov)
         return float(distance * 1.1)
 
+    def _current_cluster_box_colors(self) -> np.ndarray:
+        count = len(self._cluster_boxes)
+        if count <= 0:
+            return np.zeros((0, 3), dtype=np.float32)
+        if self._cluster_box_color_mode == "single":
+            color = np.asarray(parse_color_value(self._cluster_box_color), dtype=np.float32).reshape(1, 3)
+            return np.repeat(color, count, axis=0)
+        return generate_distinct_palette(count)
+
+    def _project_world_to_screen(
+        self,
+        point: Sequence[float],
+        mvp: np.ndarray,
+    ) -> Optional[Tuple[float, float]]:
+        clip = mvp @ np.array([float(point[0]), float(point[1]), float(point[2]), 1.0], dtype=np.float32)
+        w = float(clip[3])
+        if w <= 1e-6:
+            return None
+        ndc = clip[:3] / w
+        if not np.all(np.isfinite(ndc)):
+            return None
+        if float(ndc[2]) < -1.0 or float(ndc[2]) > 1.0:
+            return None
+        x = (float(ndc[0]) * 0.5 + 0.5) * float(self.width())
+        y = (1.0 - (float(ndc[1]) * 0.5 + 0.5)) * float(self.height())
+        return x, y
+
+    def _paint_cluster_box_labels(self, mvp: np.ndarray) -> None:
+        if not self._cluster_box_show_id or not self._cluster_boxes:
+            return
+        if self._overlay_box_colors.shape[0] != len(self._cluster_boxes):
+            self._overlay_box_colors = np.ascontiguousarray(self._current_cluster_box_colors(), dtype=np.float32)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        metrics = painter.fontMetrics()
+        viewport_rect = QRectF(0.0, 0.0, float(self.width()), float(self.height()))
+
+        for index, box in enumerate(self._cluster_boxes):
+            anchor = 0.5 * (
+                np.asarray(box.min_corner, dtype=np.float32) + np.asarray(box.max_corner, dtype=np.float32)
+            )
+            projected = self._project_world_to_screen(anchor, mvp)
+            if projected is None:
+                continue
+
+            x, y = projected
+            text = f"ID {box.cluster_id}"
+            text_width = float(metrics.horizontalAdvance(text))
+            text_height = float(metrics.height())
+            rect = QRectF(x + 8.0, y - text_height - 10.0, text_width + 10.0, text_height + 6.0)
+            rect.moveLeft(min(max(6.0, rect.left()), max(6.0, viewport_rect.width() - rect.width() - 6.0)))
+            rect.moveTop(min(max(6.0, rect.top()), max(6.0, viewport_rect.height() - rect.height() - 6.0)))
+
+            painter.fillRect(rect, QColor(10, 14, 20, 180))
+            painter.setPen(QColor(255, 255, 255, 38))
+            painter.drawRect(rect)
+            painter.setPen(QColor(color_to_hex(self._overlay_box_colors[index])))
+            baseline_x = int(round(rect.x() + 5.0))
+            baseline_y = int(round(rect.y() + metrics.ascent() + 3.0))
+            painter.drawText(baseline_x, baseline_y, text)
+
+        painter.end()
+
     def _build_color_array(self) -> np.ndarray:
         if self._cloud is None:
             return np.zeros((0, 3), dtype=np.float32)
@@ -3906,14 +4250,16 @@ class PointCloudGLWidget(QOpenGLWidget):
 
         if not self._cluster_boxes:
             self._overlay_vertex_count = 0
+            self._overlay_box_colors = np.zeros((0, 3), dtype=np.float32)
             return
 
-        palette = generate_distinct_palette(len(self._cluster_boxes))
+        box_colors = np.ascontiguousarray(self._current_cluster_box_colors(), dtype=np.float32)
+        self._overlay_box_colors = box_colors
         all_vertices: List[np.ndarray] = []
         all_colors: List[np.ndarray] = []
         for index, box in enumerate(self._cluster_boxes):
             vertices = build_bounding_box_line_vertices(box.min_corner, box.max_corner)
-            color = np.tile(palette[index], (vertices.shape[0], 1)).astype(np.float32, copy=False)
+            color = np.tile(box_colors[index], (vertices.shape[0], 1)).astype(np.float32, copy=False)
             all_vertices.append(vertices)
             all_colors.append(color)
 
@@ -3956,6 +4302,10 @@ class MainWindow(QMainWindow):
             output_directory=APP_SETTINGS.output_directory,
             point_size=APP_SETTINGS.point_size,
             viewport_background=APP_SETTINGS.viewport_background,
+            bounding_box_color_mode=APP_SETTINGS.bounding_box_color_mode,
+            bounding_box_color=APP_SETTINGS.bounding_box_color,
+            bounding_box_line_width=APP_SETTINGS.bounding_box_line_width,
+            bounding_box_show_id=APP_SETTINGS.bounding_box_show_id,
         )
         self.current_cloud: Optional[PointCloudData] = None
         self._split_module = None
@@ -4231,12 +4581,20 @@ class MainWindow(QMainWindow):
             output_directory=display_output_directory(resolve_output_directory(settings.output_directory)),
             point_size=_clamp_point_size(settings.point_size),
             viewport_background=normalize_color_value(settings.viewport_background),
+            bounding_box_color_mode=_normalize_bounding_box_color_mode(settings.bounding_box_color_mode),
+            bounding_box_color=normalize_color_value(settings.bounding_box_color),
+            bounding_box_line_width=_clamp_bounding_box_line_width(settings.bounding_box_line_width),
+            bounding_box_show_id=_coerce_bool_setting(settings.bounding_box_show_id),
         )
 
         self._settings = normalized
         APP_SETTINGS.output_directory = normalized.output_directory
         APP_SETTINGS.point_size = normalized.point_size
         APP_SETTINGS.viewport_background = normalized.viewport_background
+        APP_SETTINGS.bounding_box_color_mode = normalized.bounding_box_color_mode
+        APP_SETTINGS.bounding_box_color = normalized.bounding_box_color
+        APP_SETTINGS.bounding_box_line_width = normalized.bounding_box_line_width
+        APP_SETTINGS.bounding_box_show_id = normalized.bounding_box_show_id
 
         output_dir = ensure_data_dir()
         if update_recent_paths:
@@ -4250,6 +4608,12 @@ class MainWindow(QMainWindow):
 
         self.gl_widget.set_point_size(normalized.point_size)
         self.gl_widget.set_background_color(parse_color_value(normalized.viewport_background))
+        self.gl_widget.set_cluster_box_display_settings(
+            color_mode=normalized.bounding_box_color_mode,
+            color=normalized.bounding_box_color,
+            line_width=normalized.bounding_box_line_width,
+            show_id=normalized.bounding_box_show_id,
+        )
 
         if persist:
             save_project_settings(normalized)
