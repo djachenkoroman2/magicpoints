@@ -1,182 +1,71 @@
 # MagicPoints
 
-## Назначение
-`MagicPoints` — настольное приложение на Python (`PyQt5` + `OpenGL`) для просмотра, анализа и базовой обработки облаков точек.
+`MagicPoints` — настольное приложение на Python (`PyQt5` + `OpenGL`) для просмотра, анализа и базовой обработки облаков точек. Проект поддерживает загрузку `TXT` и `PLY`, автоматическое определение каналов `XYZ` / `label` / `RGB`, визуализацию больших наборов точек, `DBSCAN`-кластеризацию и генерацию синтетических размеченных сцен.
 
-Проект умеет:
-- загружать облака точек из `TXT` и `PLY`;
-- автоматически определять каналы `XYZ`, `label/class`, `RGB`;
-- визуализировать большие наборы точек через OpenGL VBO;
-- генерировать искусственные размеченные облака точек;
-- разделять размеченное облако на отдельные `PLY` по классам;
-- выполнять кластеризацию `DBSCAN`;
-- сохранять и загружать YAML-файлы с bounding boxes кластеров.
+## Возможности
 
-## Основные возможности
+- загрузка облаков точек из `TXT` и `PLY` (`ASCII` и `binary`);
+- автоопределение координат, меток классов и `RGB`-каналов;
+- отрисовка больших облаков через OpenGL VBO;
+- автоматическая случайная подвыборка при загрузке очень больших файлов;
+- разбиение размеченного облака на отдельные `PLY`-файлы по значениям `label`;
+- `DBSCAN`-кластеризация с сохранением кластеров в `YAML`;
+- загрузка и отображение bounding boxes поверх текущего облака;
+- генерация синтетического размеченного облака точек из GUI и CLI;
+- сохранение текущего облака в `PLY` и текущего вида в `PNG`;
+- проектные настройки: каталог вывода, размер точки, фон viewport, стиль bounding boxes.
 
-### Загрузка и отображение
-- Поддерживаются форматы `TXT` и `PLY` (`ASCII` и `binary`).
-- Если файл содержит поле `label/class`, доступна окраска по меткам.
-- Если файл содержит `RGB`, доступна окраска по цвету.
-- Если дополнительных каналов нет, используется нейтральная окраска.
-- Для очень больших файлов действует ограничение загрузки: по умолчанию не более `2,000,000` точек с автоматической случайной подвыборкой.
+## Быстрый старт
 
-### Навигация
-- орбита/вращение: ЛКМ;
-- панорамирование: СКМ или `Shift` + ЛКМ;
-- приближение/отдаление: ПКМ drag и колесо мыши;
-- для обычного режима просмотра вращение, панорамирование и `ПКМ drag` работают инверсно;
-- в `Game Navigation Mode` управление мышью оставлено прежним;
-- готовые виды: `Top`, `Front`, `Left Side`, `Right Side`, `Back`, `Bottom`, `Front Isometric`;
-- `Fit to View`;
-- `Reset View`;
-- режим `Game Navigation Mode` с управлением `WASD` + мышь.
+### Требования
 
-### Работа с размеченными облаками
-- Команда `Tools -> Split...` делит текущее облако по значениям `label`.
-- Для каждого класса сохраняется отдельный `PLY`-файл.
-- Команда доступна только если в облаке есть поле метки.
+- `Python 3.10+`;
+- видеодрайвер с поддержкой `OpenGL 2.1+`;
+- зависимости из [requirements.txt](./requirements.txt).
 
-### DBSCAN и кластеры
-- Команда `Tools -> DBSCAN...` запускает кластеризацию текущего облака.
-- Параметры `epsilon`, `MinPts` и путь к выходному YAML задаются в отдельном диалоге.
-- Результат сохраняется в YAML-файл.
-- Для каждого кластера сохраняются:
-  - `id`;
-  - `point_count`;
-  - `bounding_box.min`;
-  - `bounding_box.max`.
-- После выполнения bounding boxes автоматически накладываются поверх текущего облака.
-- Команда `File -> Open Clusters File` позволяет отдельно загрузить YAML-файл с кластерами и отобразить его как overlay.
-- Команда `File -> Clear Viewport` полностью очищает viewport: удаляет текущее облако и все загруженные bounding boxes.
+### Установка через `uv`
 
-### Генерация синтетических облаков
-- Команда `Generate -> Generate Exterior Synthetic Cloud...` открывает диалог с параметрами генерации.
-- Поддерживается экспорт и импорт YAML-конфигурации генерации.
-- После генерации результат автоматически загружается в главное окно.
-- Команда `File -> Save Cloud as PLY...` сохраняет текущее облако точек, отображаемое во viewport, без overlay bounding boxes.
-
-### Настройки проекта
-- Команда `File -> Settings` открывает диалог настроек проекта.
-- Настройки сохраняются в файл `settings.yaml` в корне проекта.
-- В диалоге можно настроить:
-  - каталог по умолчанию для сохранения файлов;
-  - размер точки во viewport в диапазоне `1..10`;
-  - цвет фона viewport через пресеты, `HEX` или `RGB`;
-  - отображение bounding boxes: случайный или фиксированный цвет, толщину линии и показ `ID` возле бокса.
-
-## Структура интерфейса
-- `File`
-  - `Clear Viewport`
-  - `Open Point Cloud File`
-  - `Open Clusters File`
-  - `Save Cloud as PLY...`
-  - `Save View as PNG...`
-  - `Settings`
-  - `Exit`
-- `Tools`
-  - `Split...`
-  - `DBSCAN...`
-- `Generate`
-  - `Generate Exterior Synthetic Cloud...`
-- `View`
-  - `Fit to View`
-  - `Reset View`
-  - `Top View`
-  - `Front View`
-  - `Left Side View`
-  - `Right Side View`
-  - `Back View`
-  - `Bottom View`
-  - `Front Isometric`
-  - `Game Navigation Mode`
-  - `Toggle RGB Mode`
-- `Help`
-  - `About`
-
-## Структура проекта
-- [main.py](./main.py) — главное GUI-приложение.
-- [utils/app_split_by_label.py](./utils/app_split_by_label.py) — CLI/API-утилита разделения размеченного облака по классам.
-- [utils/synthetic_labeled_point_cloud.py](./utils/synthetic_labeled_point_cloud.py) — CLI/API-утилита генерации синтетического облака.
-- [utils/app_dbscan_alg.py](./utils/app_dbscan_alg.py) — CLI/API-утилита кластеризации `DBSCAN`.
-- [assets/icons](./assets/icons) — иконки приложения.
-- [data](./data) — каталог по умолчанию для результатов и служебных файлов пользователя.
-- [settings.yaml](./settings.yaml) — пользовательские настройки проекта.
-
-## Каталог `data`
-По умолчанию новые результаты сохраняются в каталог `data/`, если в `settings.yaml` не указан другой путь:
-- результаты `DBSCAN`;
-- YAML-конфигурации генерации;
-- сохраненные синтетические облака;
-- стандартные результаты CLI-генератора;
-- другие рабочие файлы, создаваемые из GUI.
-
-Каталог `data/` добавлен в `.gitignore` и не попадает в репозиторий.
-
-## Установка
-Ниже показан рекомендованный вариант через `uv`.
-
-### Windows
-1. Установите `Python 3.10+`.
-2. Установите `uv`:
+#### Windows
 
 ```powershell
-pip install uv
-```
-
-3. Перейдите в каталог проекта:
-
-```powershell
+py -m pip install uv
 cd C:\path\to\magicpoints
-```
-
-4. Создайте виртуальное окружение и установите зависимости:
-
-```powershell
 uv venv
 uv pip install -r requirements.txt
-```
-
-5. Запустите приложение:
-
-```powershell
 uv run -- python main.py
 ```
 
-### Linux (Ubuntu/Debian)
-1. Установите системные библиотеки OpenGL/Qt:
+#### Linux (Ubuntu/Debian)
+
+Перед установкой Python-зависимостей желательно поставить системные библиотеки Qt/OpenGL:
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-pip libgl1 libxkbcommon-x11-0 libxcb-xinerama0 libxcb-randr0 libxcb-shape0 libxcb-xfixes0 libxcb-render0
-```
-
-2. Установите `uv`:
-
-```bash
-pip install uv
-```
-
-3. Перейдите в каталог проекта:
-
-```bash
+python3 -m pip install uv
 cd /path/to/magicpoints
-```
-
-4. Создайте виртуальное окружение и установите зависимости:
-
-```bash
 uv venv
 uv pip install -r requirements.txt
-```
-
-5. Запустите приложение:
-
-```bash
 uv run -- python main.py
 ```
 
-## Запуск приложения
+### Альтернатива через стандартный `venv`
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
+
+Для Windows в активированном окружении используйте:
+
+```powershell
+.venv\Scripts\activate
+python main.py
+```
+
+## Запуск GUI
 
 Обычный запуск:
 
@@ -184,19 +73,62 @@ uv run -- python main.py
 uv run -- python main.py
 ```
 
-Запуск с автооткрытием файла:
+Открыть файл сразу после старта:
 
 ```bash
 uv run -- python main.py /path/to/cloud.ply
 ```
 
-Запуск с ограничением числа загружаемых точек:
+Ограничить число загружаемых точек:
 
 ```bash
 uv run -- python main.py --max-points 1000000
 ```
 
+По умолчанию приложение загружает не более `2_000_000` точек. Если файл больше, используется случайная подвыборка.
+
+## Основные сценарии работы
+
+### Просмотр и навигация
+
+- вращение: `ЛКМ`;
+- панорамирование: `СКМ` или `Shift + ЛКМ`;
+- приближение и отдаление: колесо мыши или `ПКМ drag`;
+- предустановленные виды: `Top`, `Front`, `Left Side`, `Right Side`, `Back`, `Bottom`, `Front Isometric`;
+- команды `Fit to View` и `Reset View`;
+- режим `Game Navigation Mode` с управлением `WASD` + мышь.
+
+### Работа с размеченными облаками
+
+Если во входном облаке есть поле `label` / `class`, команда `Tools -> Split...` сохранит отдельный `PLY` для каждого класса. Если есть `RGB`, можно переключать режим отображения цвета через `View -> Toggle RGB Mode`.
+
+### DBSCAN и overlay кластеров
+
+Команда `Tools -> DBSCAN...` запускает кластеризацию текущего облака, сохраняет результат в `YAML` и автоматически отображает bounding boxes найденных кластеров поверх сцены. Отдельный `YAML` с кластерами можно загрузить через `File -> Open Clusters File`.
+
+Каждый кластер хранит:
+
+- `id`;
+- `point_count`;
+- `bounding_box.min`;
+- `bounding_box.max`.
+
+### Генерация синтетического облака
+
+Команда `Generate -> Generate Exterior Synthetic Cloud...` открывает диалог генерации синтетической сцены. Конфигурацию генерации можно импортировать и экспортировать в `YAML`, а результат после генерации сразу загружается в viewport.
+
+### Настройки проекта
+
+Команда `File -> Settings` управляет параметрами проекта:
+
+- каталогом по умолчанию для результатов;
+- размером точки (`1..10`);
+- цветом фона viewport;
+- цветом, толщиной линий и показом `ID` для bounding boxes.
+
 ## CLI-утилиты
+
+Все утилиты находятся в каталоге [utils](./utils).
 
 ### Split по меткам
 
@@ -206,27 +138,13 @@ uv run -- python main.py --max-points 1000000
 uv run -- python utils/app_split_by_label.py --help
 ```
 
-Пример запуска:
+Пример:
 
 ```bash
 uv run -- python utils/app_split_by_label.py /path/to/labeled_cloud.ply --prefix split --output-dir data
 ```
 
-### Генератор синтетического облака
-
-Справка:
-
-```bash
-uv run -- python utils/synthetic_labeled_point_cloud.py --help
-```
-
-Пример запуска:
-
-```bash
-uv run -- python utils/synthetic_labeled_point_cloud.py --total-points 100000 --seed 12 --no-visualize
-```
-
-По умолчанию CLI-генератор сохраняет результаты в `data/`.
+Утилита принимает `TXT` или `PLY`, ищет поле метки и сохраняет по одному `PLY`-файлу на каждый класс.
 
 ### DBSCAN
 
@@ -236,23 +154,47 @@ uv run -- python utils/synthetic_labeled_point_cloud.py --total-points 100000 --
 uv run -- python utils/app_dbscan_alg.py --help
 ```
 
-Пример запуска:
+Пример:
 
 ```bash
 uv run -- python utils/app_dbscan_alg.py /path/to/cloud.ply --epsilon 1.0 --min-pts 8 --output data/cloud_dbscan.yaml
 ```
 
-## Использование API
+Результат сохраняется в `YAML`. Если расширение не указано, утилита автоматически добавит `.yaml`.
 
-Обе утилиты можно подключать из Python-кода:
+### Генератор синтетического облака
 
-```python
-from utils import app_split_by_label as split_module
-from utils import synthetic_labeled_point_cloud as synthetic_module
-from utils import app_dbscan_alg as dbscan_module
+Справка:
+
+```bash
+uv run -- python utils/synthetic_labeled_point_cloud.py --help
 ```
 
-Пример вызова `Split` через API:
+Минимальный пример:
+
+```bash
+uv run -- python utils/synthetic_labeled_point_cloud.py --total-points 100000 --seed 12 --no-visualize
+```
+
+Пример с конфигурацией:
+
+```bash
+uv run -- python utils/synthetic_labeled_point_cloud.py --config /path/to/generation.yaml --no-visualize
+```
+
+CLI-генератор поддерживает большой набор параметров для рельефа, состава классов, количества объектов, форм крон, параметров зданий, кустарников и травяных пятен.
+
+## Использование как API
+
+Утилиты можно использовать как обычные Python-модули:
+
+```python
+from utils import app_dbscan_alg as dbscan_module
+from utils import app_split_by_label as split_module
+from utils import synthetic_labeled_point_cloud as synthetic_module
+```
+
+Пример `Split`:
 
 ```python
 result = split_module.split_point_cloud_by_label_arrays(
@@ -263,29 +205,43 @@ result = split_module.split_point_cloud_by_label_arrays(
 )
 ```
 
-Пример вызова `DBSCAN` через API:
+Пример `DBSCAN`:
 
 ```python
-result = dbscan_module.run_dbscan_on_points(points_xyz, epsilon=1.0, min_pts=8)
+result = dbscan_module.run_dbscan_on_points(
+    points_xyz,
+    epsilon=1.0,
+    min_pts=8,
+    output_path="data/cloud_dbscan.yaml",
+)
 ```
 
-Пример генерации облака:
+Пример генерации:
 
 ```python
 cloud = synthetic_module.generate_point_cloud(total_points=100000, seed=12)
 ```
 
+`generate_point_cloud(...)` возвращает массив формы `(N, 4)`, где столбцы соответствуют `x, y, z, label`.
+
 ## Форматы данных
 
-### Облако точек
-- вход GUI: `TXT`, `PLY`;
-- вход DBSCAN CLI: `TXT`, `PLY`.
+### Входные данные
 
-### Кластеры
-- формат: `YAML`;
-- используется для сохранения и загрузки bounding boxes кластеров.
+- GUI: `TXT`, `PLY`;
+- `app_split_by_label.py`: `TXT`, `PLY`;
+- `app_dbscan_alg.py`: `TXT`, `PLY`;
+- генератор: параметры CLI или `YAML`-конфигурация.
 
-Пример структуры:
+### Выходные данные
+
+- сохранение облака из GUI: `PLY`;
+- сохранение вида из GUI: `PNG`;
+- split по меткам: набор `PLY`;
+- `DBSCAN`: `YAML` с описанием кластеров;
+- конфигурация генератора: `YAML`.
+
+Пример структуры файла кластеров:
 
 ```yaml
 schema: magicpoints.dbscan.clusters.v1
@@ -300,18 +256,51 @@ clusters:
       max: [4.0, 5.0, 6.0]
 ```
 
-## Зависимости
-См. [requirements.txt](./requirements.txt):
-- `numpy>=1.24`
-- `PyOpenGL>=3.1`
-- `PyQt5>=5.15`
-- `PyYAML>=6.0`
+## `settings.yaml`
+
+Файл [settings.yaml](./settings.yaml) хранит пользовательские настройки проекта. Если путь `output_directory` относительный, он интерпретируется относительно корня репозитория.
+
+Поля файла:
+
+- `output_directory`;
+- `point_size`;
+- `viewport_background`;
+- `bounding_box_color_mode`;
+- `bounding_box_color`;
+- `bounding_box_line_width`;
+- `bounding_box_show_id`.
+
+Если `settings.yaml` отсутствует или поврежден, приложение использует встроенные значения по умолчанию.
+
+## Структура проекта
+
+- [main.py](./main.py) — GUI-приложение и основная логика визуализации.
+- [utils/app_split_by_label.py](./utils/app_split_by_label.py) — split размеченного облака на отдельные `PLY`.
+- [utils/app_dbscan_alg.py](./utils/app_dbscan_alg.py) — `DBSCAN` для `TXT` и `PLY`.
+- [utils/synthetic_labeled_point_cloud.py](./utils/synthetic_labeled_point_cloud.py) — генератор синтетических размеченных сцен.
+- [assets/icons](./assets/icons) — иконки интерфейса.
+- [requirements.txt](./requirements.txt) — Python-зависимости проекта.
+- [settings.yaml](./settings.yaml) — пользовательские настройки.
+
+## Каталог `data`
+
+Каталог `data/` не хранится в репозитории и создается по мере необходимости. По умолчанию туда попадают:
+
+- результаты `DBSCAN`;
+- экспортированные `PLY` после split;
+- конфигурации генератора;
+- синтетические облака, созданные через GUI или CLI;
+- другие рабочие файлы, если в `settings.yaml` не указан другой путь.
+
+`data/` добавлен в `.gitignore`.
 
 ## Примечания
-- Утилиты командной строки находятся в каталоге `utils/`.
-- Генератор и DBSCAN доступны как из CLI, так и через import/API.
-- Генератор может печатать статистику в консоль — это нормальное поведение.
-- Если на Linux не запускается Qt-плагин `xcb`, проверьте установку системных `libxcb*` пакетов из раздела установки.
+
+- Для `TXT`-файлов поддерживается автоопределение колонок по заголовку, если он есть.
+- При отсутствии `label` split по классам недоступен.
+- При отсутствии `RGB` переключение в цветовой режим по каналам не имеет эффекта.
+- Если на Linux появляется ошибка Qt-плагина `xcb`, проверьте установку `libxcb*` пакетов из раздела установки.
 
 ## Копирайт
-- Владелец: `Dyachenko Roman`
+
+Владелец проекта: `Dyachenko Roman`
