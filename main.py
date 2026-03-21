@@ -25,6 +25,7 @@ from OpenGL.GL import (
     GL_POINTS,
     GL_PROGRAM_POINT_SIZE,
     GL_STATIC_DRAW,
+    GL_TRIANGLES,
     GL_VERTEX_SHADER,
     glBindBuffer,
     glBufferData,
@@ -42,6 +43,7 @@ from OpenGL.GL import (
     glGetUniformLocation,
     glLineWidth,
     glUniform1f,
+    glUniform3f,
     glUniformMatrix4fv,
     glUseProgram,
     glVertexAttribPointer,
@@ -76,6 +78,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from tin_command import TINCommandParams, execute_tin_for_points
+from tin_dialog import TINDialog
 
 DEFAULT_MAX_POINTS = 2_000_000
 DEFAULT_POINT_SIZE = 3.0
@@ -311,6 +316,83 @@ def normalize_vector(v: np.ndarray) -> np.ndarray:
     if norm <= 1e-12:
         return v
     return v / norm
+
+
+def _interpolate_color_ramp(
+    values: np.ndarray,
+    stops: Sequence[float],
+    colors: Sequence[Sequence[float]],
+) -> np.ndarray:
+    result = np.empty((values.shape[0], 3), dtype=np.float64)
+    stop_arr = np.asarray(stops, dtype=np.float64)
+    color_arr = np.asarray(colors, dtype=np.float64)
+    for idx, value in enumerate(values):
+        if value <= stop_arr[0]:
+            result[idx] = color_arr[0]
+            continue
+        if value >= stop_arr[-1]:
+            result[idx] = color_arr[-1]
+            continue
+        upper = int(np.searchsorted(stop_arr, value, side="right"))
+        lower = max(0, upper - 1)
+        span = max(float(stop_arr[upper] - stop_arr[lower]), 1e-12)
+        alpha = float((value - stop_arr[lower]) / span)
+        result[idx] = (1.0 - alpha) * color_arr[lower] + alpha * color_arr[upper]
+    return np.ascontiguousarray(np.clip(result, 0.0, 1.0), dtype=np.float32)
+
+
+def apply_elevation_colormap(name: str, z_values: np.ndarray) -> np.ndarray:
+    z_array = np.asarray(z_values, dtype=np.float64).reshape(-1)
+    if z_array.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+
+    z_min = float(np.min(z_array))
+    z_max = float(np.max(z_array))
+    if not np.isfinite(z_min) or not np.isfinite(z_max) or abs(z_max - z_min) <= 1e-12:
+        normalized = np.full(z_array.shape[0], 0.5, dtype=np.float64)
+    else:
+        normalized = np.clip((z_array - z_min) / (z_max - z_min), 0.0, 1.0)
+
+    colormap = str(name).strip().lower()
+    if colormap == "grayscale":
+        gray = normalized.astype(np.float32, copy=False)
+        return np.repeat(gray.reshape(-1, 1), 3, axis=1)
+    if colormap == "viridis":
+        return _interpolate_color_ramp(
+            normalized,
+            (0.0, 0.25, 0.5, 0.75, 1.0),
+            (
+                (0.267, 0.005, 0.329),
+                (0.283, 0.141, 0.458),
+                (0.254, 0.265, 0.530),
+                (0.207, 0.478, 0.553),
+                (0.993, 0.906, 0.144),
+            ),
+        )
+    if colormap == "plasma":
+        return _interpolate_color_ramp(
+            normalized,
+            (0.0, 0.25, 0.5, 0.75, 1.0),
+            (
+                (0.050, 0.030, 0.528),
+                (0.494, 0.012, 0.658),
+                (0.798, 0.281, 0.469),
+                (0.973, 0.585, 0.252),
+                (0.940, 0.975, 0.131),
+            ),
+        )
+    return _interpolate_color_ramp(
+        normalized,
+        (0.0, 0.18, 0.36, 0.62, 0.82, 1.0),
+        (
+            (0.082, 0.204, 0.118),
+            (0.208, 0.396, 0.145),
+            (0.455, 0.596, 0.263),
+            (0.608, 0.486, 0.325),
+            (0.722, 0.707, 0.612),
+            (0.960, 0.955, 0.938),
+        ),
+    )
 
 
 def perspective_matrix(fov_y_deg: float, aspect: float, near: float, far: float) -> np.ndarray:
@@ -3463,19 +3545,38 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._cluster_box_color = normalize_color_value(APP_SETTINGS.bounding_box_color)
         self._cluster_box_show_id = bool(APP_SETTINGS.bounding_box_show_id)
         self._overlay_box_colors = np.zeros((0, 3), dtype=np.float32)
+        self._surface_vertices = np.zeros((0, 3), dtype=np.float32)
+        self._surface_triangles = np.zeros((0, 3), dtype=np.int32)
+        self._surface_render_mode = "shaded"
+        self._surface_elevation_colormap = "terrain"
+        self._surface_smooth_normals = True
 
         self._program: int = 0
+        self._mesh_program: int = 0
         self._vbo_points: int = 0
         self._vbo_colors: int = 0
         self._vbo_overlay_points: int = 0
         self._vbo_overlay_colors: int = 0
+        self._vbo_mesh_fill_points: int = 0
+        self._vbo_mesh_fill_colors: int = 0
+        self._vbo_mesh_fill_normals: int = 0
+        self._vbo_mesh_line_points: int = 0
+        self._vbo_mesh_line_colors: int = 0
         self._a_pos: int = -1
         self._a_color: int = -1
         self._u_mvp: int = -1
         self._u_point_size: int = -1
+        self._mesh_a_pos: int = -1
+        self._mesh_a_color: int = -1
+        self._mesh_a_normal: int = -1
+        self._mesh_u_mvp: int = -1
+        self._mesh_u_light_dir: int = -1
+        self._mesh_u_shading_strength: int = -1
         self._initialized = False
         self._point_count = 0
         self._overlay_vertex_count = 0
+        self._mesh_fill_vertex_count = 0
+        self._mesh_line_vertex_count = 0
         self._overlay_line_width = _clamp_bounding_box_line_width(APP_SETTINGS.bounding_box_line_width)
 
         self._fov_y_deg = 50.0
@@ -3614,6 +3715,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._last_mouse_pos = center_local
 
     def set_point_cloud(self, cloud: PointCloudData) -> None:
+        self.clear_surface_mesh(update=False)
         self._cloud = cloud
         self._scene_center = cloud.center.astype(np.float32)
         self._scene_radius = max(cloud.radius, 1e-4)
@@ -3641,6 +3743,59 @@ class PointCloudGLWidget(QOpenGLWidget):
             self._upload_cluster_overlay()
         self.update()
 
+    def has_surface_mesh(self) -> bool:
+        return bool(self._surface_vertices.shape[0] > 0 and self._surface_triangles.shape[0] > 0)
+
+    def set_surface_mesh(
+        self,
+        vertices: np.ndarray,
+        triangles: np.ndarray,
+        *,
+        render_mode: str,
+        elevation_colormap: str,
+        smooth_normals: bool,
+    ) -> None:
+        surface_vertices = np.ascontiguousarray(np.asarray(vertices, dtype=np.float32), dtype=np.float32)
+        surface_triangles = np.ascontiguousarray(np.asarray(triangles, dtype=np.int32), dtype=np.int32)
+        if surface_vertices.ndim != 2 or surface_vertices.shape[1] != 3:
+            raise ValueError("Surface mesh vertices must have shape (N, 3).")
+        if surface_triangles.ndim != 2 or surface_triangles.shape[1] != 3:
+            raise ValueError("Surface mesh triangles must have shape (M, 3).")
+        if surface_vertices.shape[0] == 0 or surface_triangles.shape[0] == 0:
+            raise ValueError("Surface mesh is empty.")
+        if np.min(surface_triangles) < 0 or np.max(surface_triangles) >= surface_vertices.shape[0]:
+            raise ValueError("Surface mesh triangle indices are out of bounds.")
+
+        self._surface_vertices = surface_vertices
+        self._surface_triangles = surface_triangles
+        self._surface_render_mode = str(render_mode).strip().lower() or "shaded"
+        self._surface_elevation_colormap = str(elevation_colormap).strip().lower() or "terrain"
+        self._surface_smooth_normals = bool(smooth_normals)
+
+        if self._cloud is None:
+            self._scene_center = np.mean(surface_vertices, axis=0, dtype=np.float64).astype(np.float32)
+            mins = np.min(surface_vertices, axis=0).astype(np.float64, copy=False)
+            maxs = np.max(surface_vertices, axis=0).astype(np.float64, copy=False)
+            self._scene_radius = max(1e-4, float(np.linalg.norm(maxs - mins) * 0.5))
+            self._pan = np.zeros(3, dtype=np.float32)
+            self._distance = self._fit_distance()
+            self._game_move_speed = max(0.35, self._scene_radius * 0.28)
+
+        if self._initialized:
+            self._upload_surface_mesh()
+        self.update()
+
+    def clear_surface_mesh(self, update: bool = True) -> None:
+        self._surface_vertices = np.zeros((0, 3), dtype=np.float32)
+        self._surface_triangles = np.zeros((0, 3), dtype=np.int32)
+        self._surface_render_mode = "shaded"
+        self._surface_elevation_colormap = "terrain"
+        self._surface_smooth_normals = True
+        self._mesh_fill_vertex_count = 0
+        self._mesh_line_vertex_count = 0
+        if update:
+            self.update()
+
     def set_cluster_boxes(self, boxes: Sequence[ClusterBoundingBoxData]) -> None:
         self._cluster_boxes = tuple(boxes)
         if self._initialized:
@@ -3653,6 +3808,7 @@ class PointCloudGLWidget(QOpenGLWidget):
 
         self._cloud = None
         self._cluster_boxes = ()
+        self.clear_surface_mesh(update=False)
         self._point_count = 0
         self._overlay_vertex_count = 0
         self._overlay_box_colors = np.zeros((0, 3), dtype=np.float32)
@@ -3747,7 +3903,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_PROGRAM_POINT_SIZE)
 
-        vertex_shader = """
+        point_vertex_shader = """
         #version 120
         attribute vec3 a_pos;
         attribute vec3 a_color;
@@ -3761,7 +3917,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         }
         """
 
-        fragment_shader = """
+        point_fragment_shader = """
         #version 120
         varying vec3 v_color;
         void main() {
@@ -3769,24 +3925,70 @@ class PointCloudGLWidget(QOpenGLWidget):
         }
         """
 
+        mesh_vertex_shader = """
+        #version 120
+        attribute vec3 a_pos;
+        attribute vec3 a_color;
+        attribute vec3 a_normal;
+        uniform mat4 u_mvp;
+        varying vec3 v_color;
+        varying vec3 v_normal;
+        void main() {
+            gl_Position = u_mvp * vec4(a_pos, 1.0);
+            v_color = a_color;
+            v_normal = a_normal;
+        }
+        """
+
+        mesh_fragment_shader = """
+        #version 120
+        varying vec3 v_color;
+        varying vec3 v_normal;
+        uniform vec3 u_light_dir;
+        uniform float u_shading_strength;
+        void main() {
+            float diffuse = max(dot(normalize(v_normal), normalize(u_light_dir)), 0.0);
+            float lit = mix(1.0, 0.25 + 0.75 * diffuse, clamp(u_shading_strength, 0.0, 1.0));
+            gl_FragColor = vec4(v_color * lit, 1.0);
+        }
+        """
+
         self._program = compileProgram(
-            compileShader(vertex_shader, GL_VERTEX_SHADER),
-            compileShader(fragment_shader, GL_FRAGMENT_SHADER),
+            compileShader(point_vertex_shader, GL_VERTEX_SHADER),
+            compileShader(point_fragment_shader, GL_FRAGMENT_SHADER),
         )
         self._a_pos = glGetAttribLocation(self._program, "a_pos")
         self._a_color = glGetAttribLocation(self._program, "a_color")
         self._u_mvp = glGetUniformLocation(self._program, "u_mvp")
         self._u_point_size = glGetUniformLocation(self._program, "u_point_size")
 
+        self._mesh_program = compileProgram(
+            compileShader(mesh_vertex_shader, GL_VERTEX_SHADER),
+            compileShader(mesh_fragment_shader, GL_FRAGMENT_SHADER),
+        )
+        self._mesh_a_pos = glGetAttribLocation(self._mesh_program, "a_pos")
+        self._mesh_a_color = glGetAttribLocation(self._mesh_program, "a_color")
+        self._mesh_a_normal = glGetAttribLocation(self._mesh_program, "a_normal")
+        self._mesh_u_mvp = glGetUniformLocation(self._mesh_program, "u_mvp")
+        self._mesh_u_light_dir = glGetUniformLocation(self._mesh_program, "u_light_dir")
+        self._mesh_u_shading_strength = glGetUniformLocation(self._mesh_program, "u_shading_strength")
+
         self._vbo_points = glGenBuffers(1)
         self._vbo_colors = glGenBuffers(1)
         self._vbo_overlay_points = glGenBuffers(1)
         self._vbo_overlay_colors = glGenBuffers(1)
+        self._vbo_mesh_fill_points = glGenBuffers(1)
+        self._vbo_mesh_fill_colors = glGenBuffers(1)
+        self._vbo_mesh_fill_normals = glGenBuffers(1)
+        self._vbo_mesh_line_points = glGenBuffers(1)
+        self._vbo_mesh_line_colors = glGenBuffers(1)
 
         self._initialized = True
         if self._cloud is not None:
             self._upload_geometry()
             self._upload_colors()
+        if self.has_surface_mesh():
+            self._upload_surface_mesh()
         self._upload_cluster_overlay()
 
         context = self.context()
@@ -3801,7 +4003,9 @@ class PointCloudGLWidget(QOpenGLWidget):
         glClearColor(*self._background, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-        if not self._initialized or self._cloud is None or self._point_count <= 0:
+        show_surface_mesh = self.has_surface_mesh()
+        show_point_cloud = self._cloud is not None and self._point_count > 0 and not show_surface_mesh
+        if not self._initialized or (not show_point_cloud and not show_surface_mesh):
             return
 
         aspect = max(1e-4, float(self.width()) / max(1.0, float(self.height())))
@@ -3823,26 +4027,73 @@ class PointCloudGLWidget(QOpenGLWidget):
             view = look_at_matrix(eye, target, self._orbit_up)
         mvp = proj @ view
 
-        glUseProgram(self._program)
-        glUniformMatrix4fv(self._u_mvp, 1, GL_FALSE, mvp.T)
-        glUniform1f(self._u_point_size, float(self._point_size))
+        if show_point_cloud:
+            glUseProgram(self._program)
+            glUniformMatrix4fv(self._u_mvp, 1, GL_FALSE, mvp.T)
+            glUniform1f(self._u_point_size, float(self._point_size))
 
-        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_points)
-        glEnableVertexAttribArray(self._a_pos)
-        glVertexAttribPointer(self._a_pos, 3, GL_FLOAT, GL_FALSE, 0, None)
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_points)
+            glEnableVertexAttribArray(self._a_pos)
+            glVertexAttribPointer(self._a_pos, 3, GL_FLOAT, GL_FALSE, 0, None)
 
-        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_colors)
-        glEnableVertexAttribArray(self._a_color)
-        glVertexAttribPointer(self._a_color, 3, GL_FLOAT, GL_FALSE, 0, None)
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_colors)
+            glEnableVertexAttribArray(self._a_color)
+            glVertexAttribPointer(self._a_color, 3, GL_FLOAT, GL_FALSE, 0, None)
 
-        glDrawArrays(GL_POINTS, 0, self._point_count)
-        glDisableVertexAttribArray(self._a_pos)
-        glDisableVertexAttribArray(self._a_color)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glDrawArrays(GL_POINTS, 0, self._point_count)
+            glDisableVertexAttribArray(self._a_pos)
+            glDisableVertexAttribArray(self._a_color)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        if show_surface_mesh and self._surface_render_mode in {"solid", "shaded"} and self._mesh_fill_vertex_count > 0:
+            glUseProgram(self._mesh_program)
+            glUniformMatrix4fv(self._mesh_u_mvp, 1, GL_FALSE, mvp.T)
+            glUniform3f(self._mesh_u_light_dir, 0.35, 0.45, 0.82)
+            glUniform1f(self._mesh_u_shading_strength, 1.0 if self._surface_render_mode == "shaded" else 0.0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_fill_points)
+            glEnableVertexAttribArray(self._mesh_a_pos)
+            glVertexAttribPointer(self._mesh_a_pos, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_fill_colors)
+            glEnableVertexAttribArray(self._mesh_a_color)
+            glVertexAttribPointer(self._mesh_a_color, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_fill_normals)
+            glEnableVertexAttribArray(self._mesh_a_normal)
+            glVertexAttribPointer(self._mesh_a_normal, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+            glDrawArrays(GL_TRIANGLES, 0, self._mesh_fill_vertex_count)
+            glDisableVertexAttribArray(self._mesh_a_pos)
+            glDisableVertexAttribArray(self._mesh_a_color)
+            glDisableVertexAttribArray(self._mesh_a_normal)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+        if show_surface_mesh and self._surface_render_mode == "wireframe" and self._mesh_line_vertex_count > 0:
+            glUseProgram(self._program)
+            glUniformMatrix4fv(self._u_mvp, 1, GL_FALSE, mvp.T)
+            glUniform1f(self._u_point_size, 1.0)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_line_points)
+            glEnableVertexAttribArray(self._a_pos)
+            glVertexAttribPointer(self._a_pos, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_line_colors)
+            glEnableVertexAttribArray(self._a_color)
+            glVertexAttribPointer(self._a_color, 3, GL_FLOAT, GL_FALSE, 0, None)
+
+            glDrawArrays(GL_LINES, 0, self._mesh_line_vertex_count)
+            glDisableVertexAttribArray(self._a_pos)
+            glDisableVertexAttribArray(self._a_color)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
 
         if self._overlay_vertex_count > 0:
             glDisable(GL_DEPTH_TEST)
             glLineWidth(float(self._overlay_line_width))
+
+            glUseProgram(self._program)
+            glUniformMatrix4fv(self._u_mvp, 1, GL_FALSE, mvp.T)
+            glUniform1f(self._u_point_size, 1.0)
 
             glBindBuffer(GL_ARRAY_BUFFER, self._vbo_overlay_points)
             glEnableVertexAttribArray(self._a_pos)
@@ -4273,6 +4524,77 @@ class PointCloudGLWidget(QOpenGLWidget):
         glBufferData(GL_ARRAY_BUFFER, overlay_colors.nbytes, overlay_colors, GL_STATIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+    def _surface_vertex_colors(self) -> np.ndarray:
+        if not self.has_surface_mesh():
+            return np.zeros((0, 3), dtype=np.float32)
+        return np.ascontiguousarray(
+            apply_elevation_colormap(self._surface_elevation_colormap, self._surface_vertices[:, 2]),
+            dtype=np.float32,
+        )
+
+    def _upload_surface_mesh(self) -> None:
+        if not self._initialized:
+            return
+        if not self.has_surface_mesh():
+            self._mesh_fill_vertex_count = 0
+            self._mesh_line_vertex_count = 0
+            return
+
+        tri_vertices = self._surface_vertices[self._surface_triangles]
+        tri_normals = np.cross(tri_vertices[:, 1] - tri_vertices[:, 0], tri_vertices[:, 2] - tri_vertices[:, 0])
+        tri_norms = np.linalg.norm(tri_normals, axis=1, keepdims=True)
+        valid = tri_norms[:, 0] > 1e-8
+        tri_normals = tri_normals.astype(np.float32, copy=False)
+        tri_normals[valid] = tri_normals[valid] / tri_norms[valid]
+        tri_normals[~valid] = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+        vertex_colors = self._surface_vertex_colors()
+        fill_points = np.ascontiguousarray(tri_vertices.reshape(-1, 3), dtype=np.float32)
+        fill_colors = np.ascontiguousarray(vertex_colors[self._surface_triangles].reshape(-1, 3), dtype=np.float32)
+
+        if self._surface_smooth_normals:
+            vertex_normals = np.zeros_like(self._surface_vertices, dtype=np.float64)
+            np.add.at(vertex_normals, self._surface_triangles[:, 0], tri_normals.astype(np.float64))
+            np.add.at(vertex_normals, self._surface_triangles[:, 1], tri_normals.astype(np.float64))
+            np.add.at(vertex_normals, self._surface_triangles[:, 2], tri_normals.astype(np.float64))
+            normal_lengths = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+            normal_mask = normal_lengths[:, 0] > 1e-8
+            vertex_normals[normal_mask] /= normal_lengths[normal_mask]
+            vertex_normals[~normal_mask] = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            fill_normals = np.ascontiguousarray(
+                vertex_normals[self._surface_triangles].reshape(-1, 3),
+                dtype=np.float32,
+            )
+        else:
+            fill_normals = np.ascontiguousarray(
+                np.repeat(tri_normals[:, None, :], 3, axis=1).reshape(-1, 3),
+                dtype=np.float32,
+            )
+
+        line_points = np.ascontiguousarray(
+            tri_vertices[:, [0, 1, 1, 2, 2, 0], :].reshape(-1, 3),
+            dtype=np.float32,
+        )
+        line_colors = np.ascontiguousarray(
+            vertex_colors[self._surface_triangles][:, [0, 1, 1, 2, 2, 0], :].reshape(-1, 3),
+            dtype=np.float32,
+        )
+
+        self._mesh_fill_vertex_count = int(fill_points.shape[0])
+        self._mesh_line_vertex_count = int(line_points.shape[0])
+
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_fill_points)
+        glBufferData(GL_ARRAY_BUFFER, fill_points.nbytes, fill_points, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_fill_colors)
+        glBufferData(GL_ARRAY_BUFFER, fill_colors.nbytes, fill_colors, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_fill_normals)
+        glBufferData(GL_ARRAY_BUFFER, fill_normals.nbytes, fill_normals, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_line_points)
+        glBufferData(GL_ARRAY_BUFFER, line_points.nbytes, line_points, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, self._vbo_mesh_line_colors)
+        glBufferData(GL_ARRAY_BUFFER, line_colors.nbytes, line_colors, GL_STATIC_DRAW)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
     def _cleanup_gl(self) -> None:
         self.makeCurrent()
         if self._vbo_points:
@@ -4287,9 +4609,27 @@ class PointCloudGLWidget(QOpenGLWidget):
         if self._vbo_overlay_colors:
             glDeleteBuffers(1, [self._vbo_overlay_colors])
             self._vbo_overlay_colors = 0
+        if self._vbo_mesh_fill_points:
+            glDeleteBuffers(1, [self._vbo_mesh_fill_points])
+            self._vbo_mesh_fill_points = 0
+        if self._vbo_mesh_fill_colors:
+            glDeleteBuffers(1, [self._vbo_mesh_fill_colors])
+            self._vbo_mesh_fill_colors = 0
+        if self._vbo_mesh_fill_normals:
+            glDeleteBuffers(1, [self._vbo_mesh_fill_normals])
+            self._vbo_mesh_fill_normals = 0
+        if self._vbo_mesh_line_points:
+            glDeleteBuffers(1, [self._vbo_mesh_line_points])
+            self._vbo_mesh_line_points = 0
+        if self._vbo_mesh_line_colors:
+            glDeleteBuffers(1, [self._vbo_mesh_line_colors])
+            self._vbo_mesh_line_colors = 0
         if self._program:
             glDeleteProgram(self._program)
             self._program = 0
+        if self._mesh_program:
+            glDeleteProgram(self._mesh_program)
+            self._mesh_program = 0
         self.doneCurrent()
         self._initialized = False
 
@@ -4311,6 +4651,7 @@ class MainWindow(QMainWindow):
         self._split_module = None
         self._synthetic_module = None
         self._dbscan_module = None
+        self._tin_module = None
         self._cluster_boxes: Tuple[ClusterBoundingBoxData, ...] = ()
         self._cluster_source_path: str = ""
         self._last_generation_params = SyntheticGenerationParams()
@@ -4319,6 +4660,7 @@ class MainWindow(QMainWindow):
         self._last_dbscan_epsilon = 1.0
         self._last_dbscan_min_pts = 8
         self._last_dbscan_output_path = str(ensure_data_dir() / "dbscan_clusters.yaml")
+        self._last_tin_params = TINCommandParams()
         self._last_cluster_yaml_dir = str(ensure_data_dir())
         self._last_view_image_dir = str(ensure_data_dir())
 
@@ -4387,6 +4729,15 @@ class MainWindow(QMainWindow):
         self.dbscan_action.setToolTip("Run DBSCAN clustering on the current point cloud")
         self.dbscan_action.setEnabled(False)
         self.dbscan_action.triggered.connect(self.run_dbscan_dialog)
+
+        self.tin_action = QAction(
+            self._icon("tin", QStyle.SP_FileDialogDetailedView),
+            "TIN...",
+            self,
+        )
+        self.tin_action.setToolTip("Build and display a triangulated irregular network mesh")
+        self.tin_action.setEnabled(False)
+        self.tin_action.triggered.connect(self.run_tin_dialog)
 
         self.save_view_png_action = QAction(
             self._icon("save_view_png", QStyle.SP_DialogSaveButton),
@@ -4508,6 +4859,7 @@ class MainWindow(QMainWindow):
         edit_menu = menu.addMenu("Tools")
         edit_menu.addAction(self.split_action)
         edit_menu.addAction(self.dbscan_action)
+        edit_menu.addAction(self.tin_action)
 
         generate_menu = menu.addMenu("Generate")
         generate_menu.addAction(self.generate_synthetic_action)
@@ -4547,6 +4899,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.split_action)
         toolbar.addAction(self.dbscan_action)
+        toolbar.addAction(self.tin_action)
         toolbar.addAction(self.clear_viewport_action)
         toolbar.addSeparator()
         toolbar.addAction(self.fit_action)
@@ -4906,6 +5259,54 @@ class MainWindow(QMainWindow):
             f"Clusters found: {cluster_count}\nSaved YAML:\n{saved_path}",
         )
 
+    def run_tin_dialog(self) -> None:
+        if self.current_cloud is None or self.current_cloud.loaded_count <= 0:
+            QMessageBox.information(self, "No Cloud", "Open a point cloud first.")
+            return
+
+        tin_module = self._get_tin_module()
+        if tin_module is None:
+            return
+
+        dialog = TINDialog(
+            cloud_name=self._current_cloud_display_name(),
+            point_count=self.current_cloud.loaded_count,
+            default_params=self._last_tin_params,
+            parent=self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        params = dialog.params()
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result = execute_tin_for_points(
+                self.current_cloud.points,
+                params=params,
+                tin_module=tin_module,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "TIN Error",
+                f"Failed to build TIN mesh:\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self._last_tin_params = result.params
+        self.gl_widget.set_surface_mesh(
+            result.mesh.vertices,
+            result.mesh.triangles,
+            render_mode=result.params.visual.render_mode,
+            elevation_colormap=result.params.visual.elevation_colormap,
+            smooth_normals=result.params.visual.smooth_normals,
+        )
+        self.statusBar().showMessage(f"TIN mesh loaded | {result.summary}", 7000)
+        self._update_status_bar()
+
     def save_current_view_as_png(self) -> None:
         if self.current_cloud is None:
             QMessageBox.information(self, "No Cloud", "Open a point cloud first.")
@@ -4960,6 +5361,7 @@ class MainWindow(QMainWindow):
         self._update_view_actions_enabled(None)
         self.split_action.setEnabled(False)
         self.dbscan_action.setEnabled(False)
+        self.tin_action.setEnabled(False)
         self.save_view_png_action.setEnabled(False)
         self._update_status_bar()
 
@@ -5314,6 +5716,7 @@ class MainWindow(QMainWindow):
 
         self.toggle_rgb_action.setEnabled(bool(has_cloud and cloud is not None and cloud.has_rgb))
         self.save_cloud_ply_action.setEnabled(has_cloud)
+        self.tin_action.setEnabled(has_cloud)
         self.clear_viewport_action.setEnabled(has_viewport_content)
 
     def _apply_cloud(self, cloud: PointCloudData) -> None:
@@ -5331,6 +5734,7 @@ class MainWindow(QMainWindow):
         self._update_view_actions_enabled(cloud)
         self.split_action.setEnabled(cloud.has_labels)
         self.dbscan_action.setEnabled(cloud.loaded_count > 0)
+        self.tin_action.setEnabled(cloud.loaded_count > 0)
         self.save_view_png_action.setEnabled(cloud.loaded_count > 0)
         self._update_status_bar()
 
@@ -5378,6 +5782,21 @@ class MainWindow(QMainWindow):
             return None
         self._dbscan_module = dbscan_module
         return self._dbscan_module
+
+    def _get_tin_module(self):
+        if self._tin_module is not None:
+            return self._tin_module
+        try:
+            from utils import tin_alg as tin_module
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "TIN Error",
+                f"Failed to import utils/tin_alg.py:\n{exc}",
+            )
+            return None
+        self._tin_module = tin_module
+        return self._tin_module
 
     def _cloud_from_generated(
         self,
@@ -5448,12 +5867,13 @@ class MainWindow(QMainWindow):
 
     def _update_status_bar(self) -> None:
         cluster_text = f" | Clusters: {len(self._cluster_boxes)}" if self._cluster_boxes else ""
+        surface_text = " | Surface: TIN" if self.gl_widget.has_surface_mesh() else ""
         if self.current_cloud is None:
             if self._cluster_source_path:
                 source_name = os.path.basename(self._cluster_source_path) or "<clusters>"
-                self.statusBar().showMessage(f"No file loaded{cluster_text} | Overlay: {source_name}")
+                self.statusBar().showMessage(f"No file loaded{cluster_text}{surface_text} | Overlay: {source_name}")
             else:
-                self.statusBar().showMessage("No file loaded")
+                self.statusBar().showMessage(f"No file loaded{surface_text}")
             return
 
         file_name = os.path.basename(self.current_cloud.file_path) or "<unknown>"
@@ -5462,7 +5882,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"File: {file_name} | Points: {self.current_cloud.loaded_count:,} / "
             f"{self.current_cloud.original_count:,} | Color: {mode_label} | Nav: {nav_label}"
-            f"{cluster_text}"
+            f"{cluster_text}{surface_text}"
         )
 
     def show_about(self) -> None:
