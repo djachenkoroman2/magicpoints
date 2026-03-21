@@ -1,6 +1,6 @@
 output_directory: data
 point_size: 3.0
-viewport_background: '#000000'
+viewport_background: '#2B2F36'
 bounding_box_color_mode: single
 bounding_box_color: '#AA55FF'
 bounding_box_line_width: 3.0

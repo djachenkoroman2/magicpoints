@@ -6,9 +6,9 @@ import re
 import struct
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import yaml
@@ -63,6 +63,7 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -79,8 +80,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from tin_command import TINCommandParams, execute_tin_for_points
-from tin_dialog import TINDialog
+from utils.tin_alg import TINMesh, TINParameters, export_mesh_to_ply, normalize_tin_parameters
 
 DEFAULT_MAX_POINTS = 2_000_000
 DEFAULT_POINT_SIZE = 3.0
@@ -774,6 +774,527 @@ class DBSCANDialog(QDialog):
                 "Invalid Output",
                 "The selected output directory does not exist.",
             )
+            return
+
+        super().accept()
+
+
+@dataclass(frozen=True)
+class TINVisualSettings:
+    """Viewport settings used to display a generated TIN mesh."""
+
+    render_mode: str = "shaded"
+    elevation_colormap: str = "terrain"
+    smooth_normals: bool = True
+
+
+@dataclass(frozen=True)
+class TINCommandParams:
+    """Combined algorithm and visualization settings for the GUI TIN command."""
+
+    algorithm: TINParameters = field(default_factory=TINParameters)
+    visual: TINVisualSettings = field(default_factory=TINVisualSettings)
+    custom_boundary_path: str = ""
+
+
+@dataclass(frozen=True)
+class TINCommandResult:
+    """TIN command output returned to the GUI after a successful build."""
+
+    mesh: TINMesh
+    params: TINCommandParams
+    summary: str
+
+
+RENDER_MODE_VALUES = ("wireframe", "solid", "shaded")
+ELEVATION_COLORMAP_VALUES = ("terrain", "viridis", "plasma", "grayscale")
+
+
+def normalize_visual_settings(
+    settings: TINVisualSettings | Mapping[str, object] | None = None,
+    **overrides: object,
+) -> TINVisualSettings:
+    """Validate and normalize the mesh display settings used by the GUI."""
+    raw: dict[str, object] = {}
+    if settings is not None:
+        if isinstance(settings, TINVisualSettings):
+            raw.update(settings.__dict__)
+        elif isinstance(settings, Mapping):
+            raw.update(settings)
+        else:
+            raise ValueError("`settings` must be a TINVisualSettings instance, mapping, or None.")
+    raw.update({key: value for key, value in overrides.items() if value is not None})
+
+    render_mode = str(raw.get("render_mode", TINVisualSettings.render_mode)).strip().lower()
+    if render_mode not in RENDER_MODE_VALUES:
+        raise ValueError(f"`render_mode` must be one of {', '.join(RENDER_MODE_VALUES)}.")
+
+    elevation_colormap = str(
+        raw.get("elevation_colormap", TINVisualSettings.elevation_colormap)
+    ).strip().lower()
+    if elevation_colormap not in ELEVATION_COLORMAP_VALUES:
+        raise ValueError(
+            "`elevation_colormap` must be one of "
+            f"{', '.join(ELEVATION_COLORMAP_VALUES)}."
+        )
+
+    smooth_normals = bool(raw.get("smooth_normals", TINVisualSettings.smooth_normals))
+    return TINVisualSettings(
+        render_mode=render_mode,
+        elevation_colormap=elevation_colormap,
+        smooth_normals=smooth_normals,
+    )
+
+
+def normalize_command_params(
+    params: TINCommandParams | Mapping[str, object] | None = None,
+    **overrides: object,
+) -> TINCommandParams:
+    """Validate and normalize the complete GUI configuration for the TIN command."""
+    raw: dict[str, object] = {}
+    if params is not None:
+        if isinstance(params, TINCommandParams):
+            raw.update(params.__dict__)
+        elif isinstance(params, Mapping):
+            raw.update(params)
+        else:
+            raise ValueError("`params` must be a TINCommandParams instance, mapping, or None.")
+    raw.update({key: value for key, value in overrides.items() if value is not None})
+
+    algorithm_raw = raw.get("algorithm")
+    visual_raw = raw.get("visual")
+    custom_boundary_path = str(raw.get("custom_boundary_path", "")).strip()
+    return TINCommandParams(
+        algorithm=normalize_tin_parameters(algorithm_raw),
+        visual=normalize_visual_settings(visual_raw),
+        custom_boundary_path=custom_boundary_path,
+    )
+
+
+def execute_tin_for_points(
+    points: np.ndarray,
+    params: TINCommandParams | Mapping[str, object] | None = None,
+    *,
+    tin_module=None,
+) -> TINCommandResult:
+    """Run the TIN algorithm for an in-memory cloud and return mesh + GUI settings."""
+    normalized = normalize_command_params(params)
+    custom_boundary = normalized.custom_boundary_path or None
+    if custom_boundary is not None and not Path(custom_boundary).is_file():
+        raise FileNotFoundError(f"Custom boundary file not found: {custom_boundary}")
+
+    module = tin_module
+    if module is None:
+        from utils import tin_alg as module
+
+    mesh = module.build_tin_from_points(
+        points=points,
+        params=normalized.algorithm,
+        custom_boundary=custom_boundary,
+    )
+    summary = (
+        f"Vertices: {mesh.vertices.shape[0]:,} | "
+        f"Triangles: {mesh.triangles.shape[0]:,} | "
+        f"Processed points: {mesh.processed_point_count:,}"
+    )
+    return TINCommandResult(mesh=mesh, params=normalized, summary=summary)
+
+
+class TINDialog(QDialog):
+    """Collect TIN algorithm and viewport settings before mesh generation."""
+
+    def __init__(
+        self,
+        cloud_name: str,
+        point_count: int,
+        default_params: TINCommandParams | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("TIN Settings")
+        self.setModal(True)
+        self.resize(620, 760)
+
+        self._cloud_name = str(cloud_name).strip() or "<in-memory point cloud>"
+        self._point_count = max(0, int(point_count))
+        self._default_params = normalize_command_params(default_params)
+
+        self.cloud_edit = QLineEdit(self)
+        self.cloud_edit.setReadOnly(True)
+        self.cloud_edit.setText(self._cloud_name)
+
+        self.point_count_edit = QLineEdit(self)
+        self.point_count_edit.setReadOnly(True)
+        self.point_count_edit.setText(f"{self._point_count:,}")
+
+        self.coincidence_tolerance_spin = self._make_float_spin(0.0, 1_000_000.0, 6)
+        self.coincidence_tolerance_spin.setValue(self._default_params.algorithm.coincidence_tolerance)
+
+        self.duplicate_handling_combo = QComboBox(self)
+        self._populate_combo(
+            self.duplicate_handling_combo,
+            (
+                ("Keep first", "keep_first"),
+                ("Average duplicates", "average"),
+                ("Remove duplicates", "remove"),
+            ),
+            self._default_params.algorithm.duplicate_handling,
+        )
+
+        self.max_edge_length_spin = self._make_float_spin(0.0, 1_000_000.0, 3)
+        self.max_edge_length_spin.setValue(self._default_params.algorithm.max_edge_length)
+        self.max_edge_length_spin.setSpecialValueText("Disabled")
+
+        self.min_angle_spin = self._make_float_spin(0.0, 179.9, 1)
+        self.min_angle_spin.setValue(self._default_params.algorithm.min_angle)
+
+        self.max_angle_spin = self._make_float_spin(0.1, 180.0, 1)
+        self.max_angle_spin.setValue(self._default_params.algorithm.max_angle)
+
+        self.outlier_filter_spin = self._make_float_spin(0.0, 100.0, 2)
+        self.outlier_filter_spin.setValue(self._default_params.algorithm.outlier_filter)
+        self.outlier_filter_spin.setSpecialValueText("Disabled")
+
+        self.boundary_type_combo = QComboBox(self)
+        self._populate_combo(
+            self.boundary_type_combo,
+            (
+                ("Convex hull", "convex_hull"),
+                ("Concave hull", "concave_hull"),
+                ("Custom polygon", "custom"),
+            ),
+            self._default_params.algorithm.boundary_type,
+        )
+
+        self.alpha_spin = self._make_float_spin(0.001, 1_000_000.0, 3)
+        self.alpha_spin.setValue(self._default_params.algorithm.alpha)
+
+        self.custom_boundary_edit = QLineEdit(self)
+        self.custom_boundary_edit.setText(self._default_params.custom_boundary_path)
+        self.custom_boundary_edit.setPlaceholderText("Ordered polygon vertices in TXT/PLY")
+        self.custom_boundary_browse = QPushButton("Browse...", self)
+        self.custom_boundary_browse.clicked.connect(self._choose_custom_boundary)
+
+        self.interpolation_combo = QComboBox(self)
+        self._populate_combo(
+            self.interpolation_combo,
+            (
+                ("Linear", "linear"),
+                ("Natural neighbor (approx.)", "natural_neighbor"),
+            ),
+            self._default_params.algorithm.interpolation_method,
+        )
+
+        self.mesh_resolution_spin = self._make_float_spin(0.0, 1_000_000.0, 3)
+        self.mesh_resolution_spin.setValue(self._default_params.algorithm.mesh_resolution)
+        self.mesh_resolution_spin.setSpecialValueText("Disabled")
+
+        self.render_mode_combo = QComboBox(self)
+        self._populate_combo(
+            self.render_mode_combo,
+            (
+                ("Wireframe", "wireframe"),
+                ("Solid", "solid"),
+                ("Shaded", "shaded"),
+            ),
+            self._default_params.visual.render_mode,
+        )
+
+        self.colormap_combo = QComboBox(self)
+        self._populate_combo(
+            self.colormap_combo,
+            (
+                ("Terrain", "terrain"),
+                ("Viridis", "viridis"),
+                ("Plasma", "plasma"),
+                ("Grayscale", "grayscale"),
+            ),
+            self._default_params.visual.elevation_colormap,
+        )
+
+        self.smooth_normals_check = QCheckBox("Smooth normals", self)
+        self.smooth_normals_check.setChecked(self._default_params.visual.smooth_normals)
+
+        self.max_points_spin = QSpinBox(self)
+        self.max_points_spin.setRange(3, 1_000_000_000)
+        self.max_points_spin.setValue(self._default_params.algorithm.max_points)
+
+        self.spatial_index_combo = QComboBox(self)
+        self._populate_combo(
+            self.spatial_index_combo,
+            (
+                ("KD-tree", "kdtree"),
+                ("R-tree", "rtree"),
+            ),
+            self._default_params.algorithm.spatial_index,
+        )
+
+        self.preview_label = QLabel(self)
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setStyleSheet("padding: 8px; background: #F4F6F9; border: 1px solid #D6DCE5;")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
+
+        content = QWidget(self)
+        content_layout = QVBoxLayout(content)
+        content_layout.addWidget(self._build_source_group())
+        content_layout.addWidget(self._build_triangulation_group())
+        content_layout.addWidget(self._build_filter_group())
+        content_layout.addWidget(self._build_boundary_group())
+        content_layout.addWidget(self._build_interpolation_group())
+        content_layout.addWidget(self._build_display_group())
+        content_layout.addWidget(self._build_performance_group())
+        content_layout.addWidget(self.preview_label)
+        content_layout.addStretch(1)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(scroll)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+        self._wire_preview_updates()
+        self._update_dependent_fields()
+        self._update_preview()
+
+    def _make_float_spin(self, minimum: float, maximum: float, decimals: int) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox(self)
+        spin.setDecimals(decimals)
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(max(10 ** (-decimals), 0.001))
+        return spin
+
+    def _populate_combo(self, combo: QComboBox, options, selected_value: str) -> None:
+        current_index = 0
+        for index, (label, value) in enumerate(options):
+            combo.addItem(label, value)
+            if value == selected_value:
+                current_index = index
+        combo.setCurrentIndex(current_index)
+
+    def _build_source_group(self) -> QGroupBox:
+        group = QGroupBox("Source", self)
+        form = QFormLayout(group)
+        form.addRow("Current cloud:", self.cloud_edit)
+        form.addRow("Input points:", self.point_count_edit)
+        return group
+
+    def _build_triangulation_group(self) -> QGroupBox:
+        group = QGroupBox("Delaunay Triangulation", self)
+        form = QFormLayout(group)
+        form.addRow("Coincidence tolerance:", self.coincidence_tolerance_spin)
+        form.addRow("Duplicate handling:", self.duplicate_handling_combo)
+        return group
+
+    def _build_filter_group(self) -> QGroupBox:
+        group = QGroupBox("Point Filtering", self)
+        form = QFormLayout(group)
+        form.addRow("Max edge length:", self.max_edge_length_spin)
+        form.addRow("Min angle:", self.min_angle_spin)
+        form.addRow("Max angle:", self.max_angle_spin)
+        form.addRow("Outlier threshold (std):", self.outlier_filter_spin)
+        return group
+
+    def _build_boundary_group(self) -> QGroupBox:
+        group = QGroupBox("Boundary Conditions", self)
+        form = QFormLayout(group)
+        self.custom_boundary_row = QWidget(self)
+        row_layout = QHBoxLayout(self.custom_boundary_row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(self.custom_boundary_edit)
+        row_layout.addWidget(self.custom_boundary_browse)
+
+        form.addRow("Boundary type:", self.boundary_type_combo)
+        form.addRow("Alpha:", self.alpha_spin)
+        form.addRow("Custom boundary:", self.custom_boundary_row)
+        return group
+
+    def _build_interpolation_group(self) -> QGroupBox:
+        group = QGroupBox("Interpolation", self)
+        form = QFormLayout(group)
+        form.addRow("Method:", self.interpolation_combo)
+        form.addRow("Mesh resolution:", self.mesh_resolution_spin)
+        return group
+
+    def _build_display_group(self) -> QGroupBox:
+        group = QGroupBox("Display", self)
+        form = QFormLayout(group)
+        form.addRow("Render mode:", self.render_mode_combo)
+        form.addRow("Elevation colormap:", self.colormap_combo)
+        form.addRow("Normals:", self.smooth_normals_check)
+        return group
+
+    def _build_performance_group(self) -> QGroupBox:
+        group = QGroupBox("Performance", self)
+        form = QFormLayout(group)
+        form.addRow("Max points:", self.max_points_spin)
+        form.addRow("Spatial index:", self.spatial_index_combo)
+        return group
+
+    def _wire_preview_updates(self) -> None:
+        widgets = (
+            self.coincidence_tolerance_spin,
+            self.duplicate_handling_combo,
+            self.max_edge_length_spin,
+            self.min_angle_spin,
+            self.max_angle_spin,
+            self.outlier_filter_spin,
+            self.boundary_type_combo,
+            self.alpha_spin,
+            self.custom_boundary_edit,
+            self.interpolation_combo,
+            self.mesh_resolution_spin,
+            self.render_mode_combo,
+            self.colormap_combo,
+            self.smooth_normals_check,
+            self.max_points_spin,
+            self.spatial_index_combo,
+        )
+        for widget in widgets:
+            if isinstance(widget, QLineEdit):
+                widget.textChanged.connect(self._update_preview)
+                widget.textChanged.connect(self._update_dependent_fields)
+            elif isinstance(widget, QCheckBox):
+                widget.toggled.connect(self._update_preview)
+                widget.toggled.connect(self._update_dependent_fields)
+            elif isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self._update_preview)
+                widget.currentIndexChanged.connect(self._update_dependent_fields)
+            else:
+                widget.valueChanged.connect(self._update_preview)
+                widget.valueChanged.connect(self._update_dependent_fields)
+
+    def _selected_value(self, combo: QComboBox) -> str:
+        return str(combo.currentData()).strip().lower()
+
+    def _choose_custom_boundary(self) -> None:
+        start_path = self.custom_boundary_path() or self._cloud_name
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Custom Boundary",
+            start_path,
+            "Point/Boundary Files (*.txt *.ply);;All Files (*)",
+        )
+        if path:
+            self.custom_boundary_edit.setText(path)
+
+    def custom_boundary_path(self) -> str:
+        return self.custom_boundary_edit.text().strip()
+
+    def params(self) -> TINCommandParams:
+        algorithm = TINParameters(
+            coincidence_tolerance=float(self.coincidence_tolerance_spin.value()),
+            duplicate_handling=self._selected_value(self.duplicate_handling_combo),
+            max_edge_length=float(self.max_edge_length_spin.value()),
+            min_angle=float(self.min_angle_spin.value()),
+            max_angle=float(self.max_angle_spin.value()),
+            outlier_filter=float(self.outlier_filter_spin.value()),
+            boundary_type=self._selected_value(self.boundary_type_combo),
+            alpha=float(self.alpha_spin.value()),
+            interpolation_method=self._selected_value(self.interpolation_combo),
+            mesh_resolution=float(self.mesh_resolution_spin.value()),
+            max_points=int(self.max_points_spin.value()),
+            spatial_index=self._selected_value(self.spatial_index_combo),
+        )
+        visual = TINVisualSettings(
+            render_mode=self._selected_value(self.render_mode_combo),
+            elevation_colormap=self._selected_value(self.colormap_combo),
+            smooth_normals=bool(self.smooth_normals_check.isChecked()),
+        )
+        return normalize_command_params(
+            TINCommandParams(
+                algorithm=algorithm,
+                visual=visual,
+                custom_boundary_path=self.custom_boundary_path(),
+            )
+        )
+
+    def _update_dependent_fields(self) -> None:
+        boundary_type = self._selected_value(self.boundary_type_combo)
+        use_alpha = boundary_type == "concave_hull"
+        use_custom_boundary = boundary_type == "custom"
+        self.alpha_spin.setEnabled(use_alpha)
+        self.custom_boundary_edit.setEnabled(use_custom_boundary)
+        self.custom_boundary_browse.setEnabled(use_custom_boundary)
+
+        render_mode = self._selected_value(self.render_mode_combo)
+        allow_normal_controls = render_mode in {"solid", "shaded"}
+        self.smooth_normals_check.setEnabled(allow_normal_controls)
+
+    def _update_preview(self) -> None:
+        boundary_type = self._selected_value(self.boundary_type_combo)
+        render_mode = self._selected_value(self.render_mode_combo)
+        max_points = int(self.max_points_spin.value())
+        processed = min(self._point_count, max_points)
+
+        if boundary_type == "concave_hull":
+            boundary_summary = f"Concave hull (alpha={self.alpha_spin.value():.3f})"
+        elif boundary_type == "custom":
+            boundary_summary = "Custom polygon"
+            if self.custom_boundary_path():
+                boundary_summary += f" from {Path(self.custom_boundary_path()).name}"
+        else:
+            boundary_summary = "Convex hull"
+
+        if float(self.mesh_resolution_spin.value()) > 0.0:
+            resampling = (
+                f"Enabled at {self.mesh_resolution_spin.value():.3f} using "
+                f"{self._selected_value(self.interpolation_combo)}"
+            )
+        else:
+            resampling = "Disabled"
+
+        normals = "smoothed" if self.smooth_normals_check.isChecked() else "flat"
+        if render_mode == "wireframe":
+            normals = "not used"
+
+        preview = (
+            f"Cloud: {self._cloud_name}\n"
+            f"Input points: {self._point_count:,}\n"
+            f"Up to {processed:,} points will reach the triangulator after performance limits.\n"
+            f"Boundary: {boundary_summary}.\n"
+            f"Resampling: {resampling}.\n"
+            f"Display: {render_mode} with {self._selected_value(self.colormap_combo)} colormap and {normals} normals."
+        )
+        self.preview_label.setText(preview)
+
+    def accept(self) -> None:
+        boundary_type = self._selected_value(self.boundary_type_combo)
+        if self.min_angle_spin.value() >= self.max_angle_spin.value():
+            QMessageBox.warning(
+                self,
+                "Invalid Angles",
+                "Minimum triangle angle must be smaller than maximum triangle angle.",
+            )
+            return
+
+        if boundary_type == "custom":
+            path = self.custom_boundary_path()
+            if not path:
+                QMessageBox.warning(
+                    self,
+                    "Missing Boundary",
+                    "Choose a custom boundary TXT/PLY file when custom boundary mode is enabled.",
+                )
+                return
+            if not Path(path).is_file():
+                QMessageBox.warning(
+                    self,
+                    "Missing Boundary",
+                    "The selected custom boundary file does not exist.",
+                )
+                return
+
+        try:
+            self.params()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Invalid Settings", str(exc))
             return
 
         super().accept()
@@ -4661,8 +5182,10 @@ class MainWindow(QMainWindow):
         self._last_dbscan_min_pts = 8
         self._last_dbscan_output_path = str(ensure_data_dir() / "dbscan_clusters.yaml")
         self._last_tin_params = TINCommandParams()
+        self._last_tin_mesh: Optional[TINMesh] = None
         self._last_cluster_yaml_dir = str(ensure_data_dir())
         self._last_view_image_dir = str(ensure_data_dir())
+        self._last_mesh_export_dir = str(ensure_data_dir())
 
         self.setWindowTitle("MagicPoints")
         self.resize(1200, 800)
@@ -4705,7 +5228,7 @@ class MainWindow(QMainWindow):
         self.open_clusters_action.triggered.connect(self.open_clusters_file_dialog)
 
         self.settings_action = QAction(
-            self.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+            self._icon("settings", QStyle.SP_FileDialogDetailedView),
             "Settings",
             self,
         )
@@ -4833,6 +5356,15 @@ class MainWindow(QMainWindow):
         self.save_cloud_ply_action.setEnabled(False)
         self.save_cloud_ply_action.triggered.connect(self.save_current_cloud_as_ply)
 
+        self.save_mesh_ply_action = QAction(
+            self._icon("save_mesh_ply", QStyle.SP_DialogSaveButton),
+            "Save Mesh as PLY...",
+            self,
+        )
+        self.save_mesh_ply_action.setToolTip("Save the current TIN surface mesh to a PLY file")
+        self.save_mesh_ply_action.setEnabled(False)
+        self.save_mesh_ply_action.triggered.connect(self.save_current_mesh_as_ply)
+
         self.exit_action = QAction(self._icon("exit", QStyle.SP_DialogCloseButton), "Exit", self)
         self.exit_action.setShortcut("Ctrl+Q")
         self.exit_action.triggered.connect(self.close)
@@ -4850,6 +5382,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.open_clusters_action)
         file_menu.addSeparator()
         file_menu.addAction(self.save_cloud_ply_action)
+        file_menu.addAction(self.save_mesh_ply_action)
         file_menu.addAction(self.save_view_png_action)
         file_menu.addSeparator()
         file_menu.addAction(self.settings_action)
@@ -4895,7 +5428,9 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.open_action)
         toolbar.addAction(self.open_clusters_action)
         toolbar.addAction(self.save_cloud_ply_action)
+        toolbar.addAction(self.save_mesh_ply_action)
         toolbar.addAction(self.save_view_png_action)
+        toolbar.addAction(self.settings_action)
         toolbar.addSeparator()
         toolbar.addAction(self.split_action)
         toolbar.addAction(self.dbscan_action)
@@ -5119,6 +5654,14 @@ class MainWindow(QMainWindow):
                 return str(ensure_data_dir() / f"{safe_stem}_export.ply")
         return str(ensure_data_dir() / "point_cloud_export.ply")
 
+    def _default_mesh_export_path(self) -> str:
+        if self.current_cloud is not None and self.current_cloud.file_path:
+            stem = Path(self.current_cloud.file_path).stem.strip()
+            if stem:
+                safe_stem = re.sub(r"[\\/:*?\"<>|]+", "_", stem)
+                return str(ensure_data_dir() / f"{safe_stem}_tin_mesh.ply")
+        return str(Path(self._last_mesh_export_dir) / "tin_mesh_export.ply")
+
     def _cluster_boxes_from_result(self, result) -> Tuple[ClusterBoundingBoxData, ...]:
         boxes: List[ClusterBoundingBoxData] = []
         for cluster in getattr(result, "clusters", ()):
@@ -5297,6 +5840,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         self._last_tin_params = result.params
+        self._last_tin_mesh = result.mesh
         self.gl_widget.set_surface_mesh(
             result.mesh.vertices,
             result.mesh.triangles,
@@ -5304,8 +5848,40 @@ class MainWindow(QMainWindow):
             elevation_colormap=result.params.visual.elevation_colormap,
             smooth_normals=result.params.visual.smooth_normals,
         )
+        self._update_view_actions_enabled(self.current_cloud)
         self.statusBar().showMessage(f"TIN mesh loaded | {result.summary}", 7000)
         self._update_status_bar()
+
+    def save_current_mesh_as_ply(self) -> None:
+        if not self.gl_widget.has_surface_mesh() or self._last_tin_mesh is None:
+            QMessageBox.information(
+                self,
+                "No Mesh",
+                "Build a TIN surface mesh first. This command saves only triangulated meshes, not point clouds or cluster boxes.",
+            )
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Mesh as PLY",
+            self._default_mesh_export_path(),
+            "PLY Files (*.ply);;All Files (*)",
+        )
+        if not path:
+            return
+
+        out_path = Path(path)
+        if out_path.suffix.lower() != ".ply":
+            out_path = out_path.with_suffix(".ply")
+
+        try:
+            export_mesh_to_ply(self._last_tin_mesh, out_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save Error", f"Failed to save mesh PLY file:\n{exc}")
+            return
+
+        self._last_mesh_export_dir = str(out_path.parent)
+        self.statusBar().showMessage(f"Saved TIN mesh: {out_path}", 7000)
 
     def save_current_view_as_png(self) -> None:
         if self.current_cloud is None:
@@ -5351,10 +5927,11 @@ class MainWindow(QMainWindow):
         self._update_status_bar()
 
     def clear_viewport(self) -> None:
-        if self.current_cloud is None and not self._cluster_boxes:
+        if self.current_cloud is None and not self._cluster_boxes and not self.gl_widget.has_surface_mesh():
             return
 
         self.current_cloud = None
+        self._last_tin_mesh = None
         self._cluster_boxes = ()
         self._cluster_source_path = ""
         self.gl_widget.clear_viewport()
@@ -5694,7 +6271,7 @@ class MainWindow(QMainWindow):
 
     def _update_view_actions_enabled(self, cloud: Optional[PointCloudData]) -> None:
         has_cloud = cloud is not None and cloud.loaded_count > 0
-        has_viewport_content = has_cloud or bool(self._cluster_boxes)
+        has_viewport_content = has_cloud or bool(self._cluster_boxes) or self.gl_widget.has_surface_mesh()
         for action in (
             self.fit_action,
             self.reset_action,
@@ -5716,11 +6293,13 @@ class MainWindow(QMainWindow):
 
         self.toggle_rgb_action.setEnabled(bool(has_cloud and cloud is not None and cloud.has_rgb))
         self.save_cloud_ply_action.setEnabled(has_cloud)
+        self.save_mesh_ply_action.setEnabled(bool(self.gl_widget.has_surface_mesh()))
         self.tin_action.setEnabled(has_cloud)
         self.clear_viewport_action.setEnabled(has_viewport_content)
 
     def _apply_cloud(self, cloud: PointCloudData) -> None:
         self.current_cloud = cloud
+        self._last_tin_mesh = None
         self.gl_widget.set_point_cloud(cloud)
         self.gl_widget.reset_view()
 
