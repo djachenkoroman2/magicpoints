@@ -113,6 +113,11 @@ BOX_COLOR_PRESETS: Tuple[Tuple[str, str], ...] = (
 )
 BOUNDING_BOX_COLOR_MODES = {"random", "single"}
 NAMED_COLOR_PRESETS: Tuple[Tuple[str, str], ...] = COLOR_PRESETS + BOX_COLOR_PRESETS
+DEFAULT_TIN_RENDER_MODE = "shaded"
+DEFAULT_TIN_ELEVATION_COLORMAP = "terrain"
+DEFAULT_TIN_SMOOTH_NORMALS = True
+TIN_RENDER_MODE_VALUES = ("wireframe", "solid", "shaded")
+TIN_ELEVATION_COLORMAP_VALUES = ("terrain", "viridis", "plasma", "grayscale")
 
 
 @dataclass
@@ -124,6 +129,9 @@ class ProjectSettings:
     bounding_box_color: str = DEFAULT_BOUNDING_BOX_COLOR_HEX
     bounding_box_line_width: float = DEFAULT_BOUNDING_BOX_LINE_WIDTH
     bounding_box_show_id: bool = False
+    tin_render_mode: str = DEFAULT_TIN_RENDER_MODE
+    tin_elevation_colormap: str = DEFAULT_TIN_ELEVATION_COLORMAP
+    tin_smooth_normals: bool = DEFAULT_TIN_SMOOTH_NORMALS
 
 
 def _clamp_point_size(value: object) -> float:
@@ -147,6 +155,20 @@ def _normalize_bounding_box_color_mode(value: object) -> str:
     if mode in BOUNDING_BOX_COLOR_MODES:
         return mode
     return DEFAULT_BOUNDING_BOX_COLOR_MODE
+
+
+def _normalize_tin_render_mode(value: object) -> str:
+    mode = str(value).strip().lower()
+    if mode in TIN_RENDER_MODE_VALUES:
+        return mode
+    return DEFAULT_TIN_RENDER_MODE
+
+
+def _normalize_tin_elevation_colormap(value: object) -> str:
+    colormap = str(value).strip().lower()
+    if colormap in TIN_ELEVATION_COLORMAP_VALUES:
+        return colormap
+    return DEFAULT_TIN_ELEVATION_COLORMAP
 
 
 def _coerce_bool_setting(value: object, default: bool = False) -> bool:
@@ -278,6 +300,16 @@ def load_project_settings() -> ProjectSettings:
         raw.get("bounding_box_show_id", settings.bounding_box_show_id),
         default=settings.bounding_box_show_id,
     )
+    settings.tin_render_mode = _normalize_tin_render_mode(
+        raw.get("mesh_render_mode", raw.get("tin_render_mode", settings.tin_render_mode))
+    )
+    settings.tin_elevation_colormap = _normalize_tin_elevation_colormap(
+        raw.get("mesh_elevation_colormap", raw.get("tin_elevation_colormap", settings.tin_elevation_colormap))
+    )
+    settings.tin_smooth_normals = _coerce_bool_setting(
+        raw.get("mesh_smooth_normals", raw.get("tin_smooth_normals", settings.tin_smooth_normals)),
+        default=settings.tin_smooth_normals,
+    )
 
     return settings
 
@@ -291,6 +323,12 @@ def save_project_settings(settings: ProjectSettings) -> None:
         "bounding_box_color": normalize_color_value(settings.bounding_box_color),
         "bounding_box_line_width": _clamp_bounding_box_line_width(settings.bounding_box_line_width),
         "bounding_box_show_id": bool(settings.bounding_box_show_id),
+        "mesh_render_mode": _normalize_tin_render_mode(settings.tin_render_mode),
+        "mesh_elevation_colormap": _normalize_tin_elevation_colormap(settings.tin_elevation_colormap),
+        "mesh_smooth_normals": _coerce_bool_setting(
+            settings.tin_smooth_normals,
+            default=DEFAULT_TIN_SMOOTH_NORMALS,
+        ),
     }
     SETTINGS_PATH.write_text(
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
@@ -574,6 +612,10 @@ class PointCloudLoaderError(Exception):
     pass
 
 
+class MeshLoaderError(Exception):
+    pass
+
+
 class SplitByLabelDialog(QDialog):
     def __init__(
         self,
@@ -783,9 +825,9 @@ class DBSCANDialog(QDialog):
 class TINVisualSettings:
     """Viewport settings used to display a generated TIN mesh."""
 
-    render_mode: str = "shaded"
-    elevation_colormap: str = "terrain"
-    smooth_normals: bool = True
+    render_mode: str = DEFAULT_TIN_RENDER_MODE
+    elevation_colormap: str = DEFAULT_TIN_ELEVATION_COLORMAP
+    smooth_normals: bool = DEFAULT_TIN_SMOOTH_NORMALS
 
 
 @dataclass(frozen=True)
@@ -806,8 +848,8 @@ class TINCommandResult:
     summary: str
 
 
-RENDER_MODE_VALUES = ("wireframe", "solid", "shaded")
-ELEVATION_COLORMAP_VALUES = ("terrain", "viridis", "plasma", "grayscale")
+RENDER_MODE_VALUES = TIN_RENDER_MODE_VALUES
+ELEVATION_COLORMAP_VALUES = TIN_ELEVATION_COLORMAP_VALUES
 
 
 def normalize_visual_settings(
@@ -838,11 +880,22 @@ def normalize_visual_settings(
             f"{', '.join(ELEVATION_COLORMAP_VALUES)}."
         )
 
-    smooth_normals = bool(raw.get("smooth_normals", TINVisualSettings.smooth_normals))
+    smooth_normals = _coerce_bool_setting(
+        raw.get("smooth_normals", TINVisualSettings.smooth_normals),
+        default=TINVisualSettings.smooth_normals,
+    )
     return TINVisualSettings(
         render_mode=render_mode,
         elevation_colormap=elevation_colormap,
         smooth_normals=smooth_normals,
+    )
+
+
+def project_tin_visual_settings(settings: ProjectSettings) -> TINVisualSettings:
+    return normalize_visual_settings(
+        render_mode=settings.tin_render_mode,
+        elevation_colormap=settings.tin_elevation_colormap,
+        smooth_normals=settings.tin_smooth_normals,
     )
 
 
@@ -901,7 +954,7 @@ def execute_tin_for_points(
 
 
 class TINDialog(QDialog):
-    """Collect TIN algorithm and viewport settings before mesh generation."""
+    """Collect TIN algorithm settings before mesh generation."""
 
     def __init__(
         self,
@@ -913,7 +966,7 @@ class TINDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("TIN Settings")
         self.setModal(True)
-        self.resize(620, 760)
+        self.resize(620, 700)
 
         self._cloud_name = str(cloud_name).strip() or "<in-memory point cloud>"
         self._point_count = max(0, int(point_count))
@@ -989,32 +1042,6 @@ class TINDialog(QDialog):
         self.mesh_resolution_spin.setValue(self._default_params.algorithm.mesh_resolution)
         self.mesh_resolution_spin.setSpecialValueText("Disabled")
 
-        self.render_mode_combo = QComboBox(self)
-        self._populate_combo(
-            self.render_mode_combo,
-            (
-                ("Wireframe", "wireframe"),
-                ("Solid", "solid"),
-                ("Shaded", "shaded"),
-            ),
-            self._default_params.visual.render_mode,
-        )
-
-        self.colormap_combo = QComboBox(self)
-        self._populate_combo(
-            self.colormap_combo,
-            (
-                ("Terrain", "terrain"),
-                ("Viridis", "viridis"),
-                ("Plasma", "plasma"),
-                ("Grayscale", "grayscale"),
-            ),
-            self._default_params.visual.elevation_colormap,
-        )
-
-        self.smooth_normals_check = QCheckBox("Smooth normals", self)
-        self.smooth_normals_check.setChecked(self._default_params.visual.smooth_normals)
-
         self.max_points_spin = QSpinBox(self)
         self.max_points_spin.setRange(3, 1_000_000_000)
         self.max_points_spin.setValue(self._default_params.algorithm.max_points)
@@ -1045,7 +1072,6 @@ class TINDialog(QDialog):
         content_layout.addWidget(self._build_filter_group())
         content_layout.addWidget(self._build_boundary_group())
         content_layout.addWidget(self._build_interpolation_group())
-        content_layout.addWidget(self._build_display_group())
         content_layout.addWidget(self._build_performance_group())
         content_layout.addWidget(self.preview_label)
         content_layout.addStretch(1)
@@ -1122,14 +1148,6 @@ class TINDialog(QDialog):
         form.addRow("Mesh resolution:", self.mesh_resolution_spin)
         return group
 
-    def _build_display_group(self) -> QGroupBox:
-        group = QGroupBox("Display", self)
-        form = QFormLayout(group)
-        form.addRow("Render mode:", self.render_mode_combo)
-        form.addRow("Elevation colormap:", self.colormap_combo)
-        form.addRow("Normals:", self.smooth_normals_check)
-        return group
-
     def _build_performance_group(self) -> QGroupBox:
         group = QGroupBox("Performance", self)
         form = QFormLayout(group)
@@ -1150,9 +1168,6 @@ class TINDialog(QDialog):
             self.custom_boundary_edit,
             self.interpolation_combo,
             self.mesh_resolution_spin,
-            self.render_mode_combo,
-            self.colormap_combo,
-            self.smooth_normals_check,
             self.max_points_spin,
             self.spatial_index_combo,
         )
@@ -1202,15 +1217,10 @@ class TINDialog(QDialog):
             max_points=int(self.max_points_spin.value()),
             spatial_index=self._selected_value(self.spatial_index_combo),
         )
-        visual = TINVisualSettings(
-            render_mode=self._selected_value(self.render_mode_combo),
-            elevation_colormap=self._selected_value(self.colormap_combo),
-            smooth_normals=bool(self.smooth_normals_check.isChecked()),
-        )
         return normalize_command_params(
             TINCommandParams(
                 algorithm=algorithm,
-                visual=visual,
+                visual=self._default_params.visual,
                 custom_boundary_path=self.custom_boundary_path(),
             )
         )
@@ -1223,13 +1233,9 @@ class TINDialog(QDialog):
         self.custom_boundary_edit.setEnabled(use_custom_boundary)
         self.custom_boundary_browse.setEnabled(use_custom_boundary)
 
-        render_mode = self._selected_value(self.render_mode_combo)
-        allow_normal_controls = render_mode in {"solid", "shaded"}
-        self.smooth_normals_check.setEnabled(allow_normal_controls)
 
     def _update_preview(self) -> None:
         boundary_type = self._selected_value(self.boundary_type_combo)
-        render_mode = self._selected_value(self.render_mode_combo)
         max_points = int(self.max_points_spin.value())
         processed = min(self._point_count, max_points)
 
@@ -1250,17 +1256,12 @@ class TINDialog(QDialog):
         else:
             resampling = "Disabled"
 
-        normals = "smoothed" if self.smooth_normals_check.isChecked() else "flat"
-        if render_mode == "wireframe":
-            normals = "not used"
-
         preview = (
             f"Cloud: {self._cloud_name}\n"
             f"Input points: {self._point_count:,}\n"
             f"Up to {processed:,} points will reach the triangulator after performance limits.\n"
             f"Boundary: {boundary_summary}.\n"
-            f"Resampling: {resampling}.\n"
-            f"Display: {render_mode} with {self._selected_value(self.colormap_combo)} colormap and {normals} normals."
+            f"Resampling: {resampling}."
         )
         self.preview_label.setText(preview)
 
@@ -1503,6 +1504,15 @@ class PointCloudLoader:
                 raise PointCloudLoaderError("PLY header missing format declaration.")
             if format_type not in {"ascii", "binary_little_endian", "binary_big_endian"}:
                 raise PointCloudLoaderError(f"Unsupported PLY format '{format_type}'.")
+
+            face_element = next(
+                (element for element in elements if element.name.lower() == "face" and element.count > 0),
+                None,
+            )
+            if face_element is not None:
+                raise PointCloudLoaderError(
+                    "PLY file contains face data and represents a mesh. Use File -> Open Mesh File instead."
+                )
 
             vertex_columns: Optional[Dict[str, np.ndarray]] = None
             if format_type == "ascii":
@@ -1757,6 +1767,317 @@ class PointCloudLoader:
         if max_value > 1.0:
             rgb = rgb / 255.0
         return np.clip(rgb, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+class MeshLoader:
+    SUPPORTED_FORMATS = {"ascii", "binary_little_endian", "binary_big_endian"}
+
+    @classmethod
+    def load_ply(cls, path: str) -> TINMesh:
+        if not os.path.isfile(path):
+            raise MeshLoaderError(f"File not found: {path}")
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext != ".ply":
+            raise MeshLoaderError(f"Unsupported file extension '{ext}'. Use PLY.")
+
+        try:
+            with open(path, "rb") as fh:
+                first = fh.readline().decode("ascii", errors="ignore").strip()
+                if first.lower() != "ply":
+                    raise MeshLoaderError("Invalid PLY file: missing 'ply' magic header.")
+
+                format_type: Optional[str] = None
+                elements: List[PlyElement] = []
+                current_element: Optional[PlyElement] = None
+
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        raise MeshLoaderError("Unexpected end of file while reading PLY header.")
+                    text = line.decode("ascii", errors="ignore").strip()
+                    if text == "end_header":
+                        break
+                    if not text:
+                        continue
+
+                    parts = text.split()
+                    keyword = parts[0].lower()
+                    if keyword in {"comment", "obj_info"}:
+                        continue
+                    if keyword == "format":
+                        if len(parts) < 2:
+                            raise MeshLoaderError("Malformed PLY format declaration.")
+                        format_type = parts[1].lower()
+                    elif keyword == "element":
+                        if len(parts) != 3:
+                            raise MeshLoaderError(f"Malformed PLY element declaration: '{text}'")
+                        try:
+                            count = int(parts[2])
+                        except ValueError as exc:
+                            raise MeshLoaderError(f"Invalid element count in PLY header: '{parts[2]}'") from exc
+                        current_element = PlyElement(name=parts[1], count=count, properties=[])
+                        elements.append(current_element)
+                    elif keyword == "property":
+                        if current_element is None:
+                            raise MeshLoaderError("PLY property declared before any element.")
+                        if len(parts) >= 5 and parts[1].lower() == "list":
+                            current_element.properties.append(
+                                PlyProperty(
+                                    kind="list",
+                                    count_dtype=parts[2].lower(),
+                                    dtype=parts[3].lower(),
+                                    name=parts[4],
+                                )
+                            )
+                        elif len(parts) == 3:
+                            current_element.properties.append(
+                                PlyProperty(kind="scalar", dtype=parts[1].lower(), name=parts[2])
+                            )
+                        else:
+                            raise MeshLoaderError(f"Malformed PLY property declaration: '{text}'")
+
+                if format_type is None:
+                    raise MeshLoaderError("PLY header missing format declaration.")
+                if format_type not in cls.SUPPORTED_FORMATS:
+                    raise MeshLoaderError(f"Unsupported PLY format '{format_type}'.")
+
+                vertex_element = next((element for element in elements if element.name.lower() == "vertex"), None)
+                if vertex_element is None:
+                    raise MeshLoaderError("PLY file does not contain a 'vertex' element.")
+
+                face_element = next((element for element in elements if element.name.lower() == "face"), None)
+                if face_element is None or face_element.count <= 0:
+                    raise MeshLoaderError("PLY file does not contain any faces and is not a mesh.")
+
+                face_index_property = cls._find_face_index_property(face_element)
+                if face_index_property is None:
+                    raise MeshLoaderError("PLY face element does not define vertex indices.")
+
+                vertices: Optional[np.ndarray] = None
+                triangles: Optional[np.ndarray] = None
+                if format_type == "ascii":
+                    for element in elements:
+                        name = element.name.lower()
+                        if name == "vertex":
+                            columns = PointCloudLoader._read_ascii_element(fh, element, keep=True)
+                            assert columns is not None
+                            vertices = cls._vertices_from_columns(columns)
+                        elif name == "face":
+                            if vertices is None:
+                                raise MeshLoaderError(
+                                    "PLY file declares faces before vertices; this layout is not supported."
+                                )
+                            triangles = cls._read_ascii_faces(
+                                fh,
+                                element,
+                                face_index_property,
+                                vertices.shape[0],
+                            )
+                        else:
+                            PointCloudLoader._read_ascii_element(fh, element, keep=False)
+                else:
+                    endian = "<" if format_type == "binary_little_endian" else ">"
+                    for element in elements:
+                        name = element.name.lower()
+                        if name == "vertex":
+                            columns = PointCloudLoader._read_binary_element(fh, element, endian=endian, keep=True)
+                            assert columns is not None
+                            vertices = cls._vertices_from_columns(columns)
+                        elif name == "face":
+                            if vertices is None:
+                                raise MeshLoaderError(
+                                    "PLY file declares faces before vertices; this layout is not supported."
+                                )
+                            triangles = cls._read_binary_faces(
+                                fh,
+                                element,
+                                endian,
+                                face_index_property,
+                                vertices.shape[0],
+                            )
+                        else:
+                            PointCloudLoader._read_binary_element(fh, element, endian=endian, keep=False)
+
+                if vertices is None or vertices.shape[0] == 0:
+                    raise MeshLoaderError("PLY mesh does not contain any vertices.")
+                if triangles is None or triangles.shape[0] == 0:
+                    raise MeshLoaderError("PLY mesh does not contain any triangular faces.")
+        except PointCloudLoaderError as exc:
+            raise MeshLoaderError(str(exc)) from exc
+
+        return TINMesh(
+            vertices=vertices,
+            triangles=triangles,
+            source_point_count=int(vertices.shape[0]),
+            processed_point_count=int(vertices.shape[0]),
+            metadata={
+                "source_kind": "mesh_file",
+                "source_path": path,
+            },
+        )
+
+    @staticmethod
+    def _find_face_index_property(element: PlyElement) -> Optional[PlyProperty]:
+        list_properties = [prop for prop in element.properties if prop.kind == "list"]
+        if not list_properties:
+            return None
+
+        for candidate in list_properties:
+            if normalize_field_name(candidate.name) in {"vertexindices", "vertexindex"}:
+                return candidate
+        return list_properties[0]
+
+    @staticmethod
+    def _vertices_from_columns(columns: Dict[str, np.ndarray]) -> np.ndarray:
+        normalized_to_original = {normalize_field_name(name): name for name in columns.keys()}
+
+        def pick(*keys: str) -> Optional[str]:
+            for key in keys:
+                hit = normalized_to_original.get(key)
+                if hit is not None:
+                    return hit
+            return None
+
+        x_name = pick("x")
+        y_name = pick("y")
+        z_name = pick("z")
+        if x_name is None or y_name is None or z_name is None:
+            raise MeshLoaderError("PLY vertex data does not provide required x/y/z fields.")
+
+        vertices = np.stack([columns[x_name], columns[y_name], columns[z_name]], axis=1).astype(
+            np.float32,
+            copy=False,
+        )
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or vertices.shape[0] == 0:
+            raise MeshLoaderError("PLY mesh does not contain valid XYZ vertex coordinates.")
+        return np.ascontiguousarray(vertices, dtype=np.float32)
+
+    @classmethod
+    def _read_ascii_faces(
+        cls,
+        fh,
+        element: PlyElement,
+        face_index_property: PlyProperty,
+        vertex_count: int,
+    ) -> np.ndarray:
+        triangles = np.empty((element.count, 3), dtype=np.int32)
+        target_name = normalize_field_name(face_index_property.name)
+
+        for row_index in range(element.count):
+            line = fh.readline()
+            if not line:
+                raise MeshLoaderError(
+                    f"Unexpected end of PLY file while reading ASCII element '{element.name}'."
+                )
+            tokens = line.decode("ascii", errors="ignore").strip().split()
+            token_idx = 0
+            triangle: Optional[Tuple[int, int, int]] = None
+
+            for prop in element.properties:
+                if prop.kind == "scalar":
+                    if token_idx >= len(tokens):
+                        raise MeshLoaderError(
+                            f"Malformed ASCII PLY row {row_index + 1} in element '{element.name}'."
+                        )
+                    token_idx += 1
+                    continue
+
+                if token_idx >= len(tokens):
+                    raise MeshLoaderError(
+                        f"Malformed list property in ASCII PLY row {row_index + 1}."
+                    )
+                try:
+                    list_count = int(float(tokens[token_idx]))
+                except ValueError as exc:
+                    raise MeshLoaderError(
+                        f"Invalid list count in ASCII PLY row {row_index + 1}."
+                    ) from exc
+                token_idx += 1
+                if token_idx + list_count > len(tokens):
+                    raise MeshLoaderError(
+                        f"List property overflow in ASCII PLY row {row_index + 1}."
+                    )
+                if normalize_field_name(prop.name) == target_name:
+                    triangle = cls._triangle_from_values(
+                        tokens[token_idx:token_idx + list_count],
+                        row_index,
+                        vertex_count,
+                    )
+                token_idx += list_count
+
+            if triangle is None:
+                raise MeshLoaderError(f"PLY face row {row_index + 1} does not provide vertex indices.")
+            triangles[row_index] = triangle
+
+        return triangles
+
+    @classmethod
+    def _read_binary_faces(
+        cls,
+        fh,
+        element: PlyElement,
+        endian: str,
+        face_index_property: PlyProperty,
+        vertex_count: int,
+    ) -> np.ndarray:
+        triangles = np.empty((element.count, 3), dtype=np.int32)
+        target_name = normalize_field_name(face_index_property.name)
+
+        for row_index in range(element.count):
+            triangle: Optional[Tuple[int, int, int]] = None
+            for prop in element.properties:
+                if prop.kind == "scalar":
+                    PointCloudLoader._read_binary_value(fh, endian, prop.dtype)
+                    continue
+
+                assert prop.count_dtype is not None
+                list_count = int(PointCloudLoader._read_binary_value(fh, endian, prop.count_dtype))
+                if normalize_field_name(prop.name) == target_name:
+                    values = [
+                        int(PointCloudLoader._read_binary_value(fh, endian, prop.dtype))
+                        for _ in range(list_count)
+                    ]
+                    triangle = cls._triangle_from_values(values, row_index, vertex_count)
+                else:
+                    skip_size = list_count * PointCloudLoader._type_size(prop.dtype)
+                    if skip_size > 0:
+                        skipped = fh.read(skip_size)
+                        if len(skipped) != skip_size:
+                            raise MeshLoaderError(
+                                f"Unexpected EOF while skipping binary list data in element '{element.name}'."
+                            )
+
+            if triangle is None:
+                raise MeshLoaderError(f"PLY face row {row_index + 1} does not provide vertex indices.")
+            triangles[row_index] = triangle
+
+        return triangles
+
+    @staticmethod
+    def _triangle_from_values(
+        values: Sequence[object],
+        row_index: int,
+        vertex_count: int,
+    ) -> Tuple[int, int, int]:
+        if len(values) != 3:
+            raise MeshLoaderError(
+                "PLY mesh contains non-triangular faces. Only triangle meshes are supported by Open Mesh File."
+            )
+
+        triangle: List[int] = []
+        for value in values:
+            try:
+                index = int(value) if isinstance(value, int) else int(float(value))
+            except (TypeError, ValueError) as exc:
+                raise MeshLoaderError(f"Invalid face index in PLY face row {row_index + 1}.") from exc
+            if index < 0 or index >= vertex_count:
+                raise MeshLoaderError(
+                    f"PLY face row {row_index + 1} references vertex index {index}, which is out of bounds."
+                )
+            triangle.append(index)
+
+        return triangle[0], triangle[1], triangle[2]
 
 
 def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> None:
@@ -3697,6 +4018,7 @@ class SyntheticGenerationDialog(QDialog):
 class SettingsDialog(QDialog):
     def __init__(self, settings: ProjectSettings, parent=None):
         super().__init__(parent)
+        accepted_tin_visual = project_tin_visual_settings(settings)
         self._accepted_settings = ProjectSettings(
             output_directory=str(settings.output_directory).strip() or "data",
             point_size=_clamp_point_size(settings.point_size),
@@ -3705,6 +4027,9 @@ class SettingsDialog(QDialog):
             bounding_box_color=normalize_color_value(settings.bounding_box_color),
             bounding_box_line_width=_clamp_bounding_box_line_width(settings.bounding_box_line_width),
             bounding_box_show_id=bool(settings.bounding_box_show_id),
+            tin_render_mode=accepted_tin_visual.render_mode,
+            tin_elevation_colormap=accepted_tin_visual.elevation_colormap,
+            tin_smooth_normals=accepted_tin_visual.smooth_normals,
         )
 
         self.setWindowTitle("Project Settings")
@@ -3831,8 +4156,56 @@ class SettingsDialog(QDialog):
         bounding_box_layout.addLayout(bounding_box_form)
         bounding_box_layout.addStretch(1)
 
+        self.tin_render_mode_combo = QComboBox(self)
+        for label, value in (
+            ("Wireframe", "wireframe"),
+            ("Solid", "solid"),
+            ("Shaded", "shaded"),
+        ):
+            self.tin_render_mode_combo.addItem(label, value)
+        for index in range(self.tin_render_mode_combo.count()):
+            if self.tin_render_mode_combo.itemData(index) == self._accepted_settings.tin_render_mode:
+                self.tin_render_mode_combo.setCurrentIndex(index)
+                break
+
+        self.tin_colormap_combo = QComboBox(self)
+        for label, value in (
+            ("Terrain", "terrain"),
+            ("Viridis", "viridis"),
+            ("Plasma", "plasma"),
+            ("Grayscale", "grayscale"),
+        ):
+            self.tin_colormap_combo.addItem(label, value)
+        for index in range(self.tin_colormap_combo.count()):
+            if self.tin_colormap_combo.itemData(index) == self._accepted_settings.tin_elevation_colormap:
+                self.tin_colormap_combo.setCurrentIndex(index)
+                break
+
+        self.tin_smooth_normals_check = QCheckBox("Smooth normals", self)
+        self.tin_smooth_normals_check.setChecked(bool(self._accepted_settings.tin_smooth_normals))
+
+        tin_display_help_label = QLabel(
+            "These settings control how meshes are drawn and are applied immediately to the current mesh.",
+            self,
+        )
+        tin_display_help_label.setWordWrap(True)
+        tin_display_help_label.setStyleSheet("color: #5a6777;")
+
+        tin_display_form = QFormLayout()
+        tin_display_form.addRow("Render mode:", self.tin_render_mode_combo)
+        tin_display_form.addRow("Elevation colormap:", self.tin_colormap_combo)
+        tin_display_form.addRow("Normals:", self.tin_smooth_normals_check)
+        tin_display_form.addRow("", tin_display_help_label)
+
+        tin_display_tab = QWidget(self)
+        tin_display_layout = QVBoxLayout(tin_display_tab)
+        tin_display_layout.setContentsMargins(0, 0, 0, 0)
+        tin_display_layout.addLayout(tin_display_form)
+        tin_display_layout.addStretch(1)
+
         self.tabs.addTab(general_tab, "General")
         self.tabs.addTab(bounding_box_tab, "Bounding Boxes")
+        self.tabs.addTab(tin_display_tab, "Mesh Display")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
@@ -3861,6 +4234,9 @@ class SettingsDialog(QDialog):
             bounding_box_color=self._accepted_settings.bounding_box_color,
             bounding_box_line_width=self._accepted_settings.bounding_box_line_width,
             bounding_box_show_id=self._accepted_settings.bounding_box_show_id,
+            tin_render_mode=self._accepted_settings.tin_render_mode,
+            tin_elevation_colormap=self._accepted_settings.tin_elevation_colormap,
+            tin_smooth_normals=self._accepted_settings.tin_smooth_normals,
         )
 
     def _browse_output_directory(self) -> None:
@@ -4025,6 +4401,17 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "Invalid Settings", f"Invalid bounding box color:\n{exc}")
             return
 
+        try:
+            tin_visual = normalize_visual_settings(
+                render_mode=self.tin_render_mode_combo.currentData(),
+                elevation_colormap=self.tin_colormap_combo.currentData(),
+                smooth_normals=self.tin_smooth_normals_check.isChecked(),
+            )
+        except ValueError as exc:
+            self.tabs.setCurrentIndex(2)
+            QMessageBox.warning(self, "Invalid Settings", f"Invalid mesh display settings:\n{exc}")
+            return
+
         self._accepted_settings = ProjectSettings(
             output_directory=display_output_directory(resolved_output_dir),
             point_size=float(self.point_size_spin.value()),
@@ -4033,6 +4420,9 @@ class SettingsDialog(QDialog):
             bounding_box_color=normalized_bounding_box_color,
             bounding_box_line_width=_clamp_bounding_box_line_width(self.bounding_box_line_width_spin.value()),
             bounding_box_show_id=bool(self.bounding_box_show_id_check.isChecked()),
+            tin_render_mode=tin_visual.render_mode,
+            tin_elevation_colormap=tin_visual.elevation_colormap,
+            tin_smooth_normals=tin_visual.smooth_normals,
         )
         super().accept()
 
@@ -4068,9 +4458,10 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._overlay_box_colors = np.zeros((0, 3), dtype=np.float32)
         self._surface_vertices = np.zeros((0, 3), dtype=np.float32)
         self._surface_triangles = np.zeros((0, 3), dtype=np.int32)
-        self._surface_render_mode = "shaded"
-        self._surface_elevation_colormap = "terrain"
-        self._surface_smooth_normals = True
+        surface_visual = project_tin_visual_settings(APP_SETTINGS)
+        self._surface_render_mode = surface_visual.render_mode
+        self._surface_elevation_colormap = surface_visual.elevation_colormap
+        self._surface_smooth_normals = surface_visual.smooth_normals
 
         self._program: int = 0
         self._mesh_program: int = 0
@@ -4195,7 +4586,7 @@ class PointCloudGLWidget(QOpenGLWidget):
             return
 
         if next_mode == "game":
-            if self._cloud is None:
+            if not self.has_scene_content():
                 return
             self._game_position = self._current_orbit_eye()
             self._sync_game_angles_from_orbit_view()
@@ -4267,6 +4658,9 @@ class PointCloudGLWidget(QOpenGLWidget):
     def has_surface_mesh(self) -> bool:
         return bool(self._surface_vertices.shape[0] > 0 and self._surface_triangles.shape[0] > 0)
 
+    def has_scene_content(self) -> bool:
+        return bool((self._cloud is not None and self._point_count > 0) or self.has_surface_mesh())
+
     def set_surface_mesh(
         self,
         vertices: np.ndarray,
@@ -4289,9 +4683,14 @@ class PointCloudGLWidget(QOpenGLWidget):
 
         self._surface_vertices = surface_vertices
         self._surface_triangles = surface_triangles
-        self._surface_render_mode = str(render_mode).strip().lower() or "shaded"
-        self._surface_elevation_colormap = str(elevation_colormap).strip().lower() or "terrain"
-        self._surface_smooth_normals = bool(smooth_normals)
+        surface_visual = normalize_visual_settings(
+            render_mode=render_mode,
+            elevation_colormap=elevation_colormap,
+            smooth_normals=smooth_normals,
+        )
+        self._surface_render_mode = surface_visual.render_mode
+        self._surface_elevation_colormap = surface_visual.elevation_colormap
+        self._surface_smooth_normals = surface_visual.smooth_normals
 
         if self._cloud is None:
             self._scene_center = np.mean(surface_vertices, axis=0, dtype=np.float64).astype(np.float32)
@@ -4306,12 +4705,40 @@ class PointCloudGLWidget(QOpenGLWidget):
             self._upload_surface_mesh()
         self.update()
 
+    def set_surface_display_settings(
+        self,
+        *,
+        render_mode: str,
+        elevation_colormap: str,
+        smooth_normals: bool,
+    ) -> None:
+        surface_visual = normalize_visual_settings(
+            render_mode=render_mode,
+            elevation_colormap=elevation_colormap,
+            smooth_normals=smooth_normals,
+        )
+        buffers_changed = (
+            surface_visual.elevation_colormap != self._surface_elevation_colormap
+            or surface_visual.smooth_normals != self._surface_smooth_normals
+        )
+        display_changed = buffers_changed or surface_visual.render_mode != self._surface_render_mode
+
+        self._surface_render_mode = surface_visual.render_mode
+        self._surface_elevation_colormap = surface_visual.elevation_colormap
+        self._surface_smooth_normals = surface_visual.smooth_normals
+
+        if buffers_changed and self._initialized and self.has_surface_mesh():
+            self._upload_surface_mesh()
+        if display_changed:
+            self.update()
+
     def clear_surface_mesh(self, update: bool = True) -> None:
         self._surface_vertices = np.zeros((0, 3), dtype=np.float32)
         self._surface_triangles = np.zeros((0, 3), dtype=np.int32)
-        self._surface_render_mode = "shaded"
-        self._surface_elevation_colormap = "terrain"
-        self._surface_smooth_normals = True
+        surface_visual = project_tin_visual_settings(APP_SETTINGS)
+        self._surface_render_mode = surface_visual.render_mode
+        self._surface_elevation_colormap = surface_visual.elevation_colormap
+        self._surface_smooth_normals = surface_visual.smooth_normals
         self._mesh_fill_vertex_count = 0
         self._mesh_line_vertex_count = 0
         if update:
@@ -4375,17 +4802,24 @@ class PointCloudGLWidget(QOpenGLWidget):
             self.set_color_mode("rgb")
 
     def fit_to_view(self) -> None:
-        if self._cloud is None:
+        if not self.has_scene_content():
             return
         self._pan = np.zeros(3, dtype=np.float32)
-        self._scene_center = self._cloud.center.astype(np.float32)
+        if self._cloud is not None:
+            self._scene_center = self._cloud.center.astype(np.float32)
+            self._scene_radius = max(self._cloud.radius, 1e-4)
+        else:
+            self._scene_center = np.mean(self._surface_vertices, axis=0, dtype=np.float64).astype(np.float32)
+            mins = np.min(self._surface_vertices, axis=0).astype(np.float64, copy=False)
+            maxs = np.max(self._surface_vertices, axis=0).astype(np.float64, copy=False)
+            self._scene_radius = max(1e-4, float(np.linalg.norm(maxs - mins) * 0.5))
         self._distance = self._fit_distance()
         if self._navigation_mode == "game":
             self._game_position = self._scene_center - self._game_forward_direction() * self._distance
         self.update()
 
     def reset_view(self) -> None:
-        if self._cloud is None:
+        if not self.has_scene_content():
             return
         self._yaw = self.DEFAULT_YAW
         self._pitch = self.DEFAULT_PITCH
@@ -4639,7 +5073,7 @@ class PointCloudGLWidget(QOpenGLWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._navigation_mode == "game":
-            if self._cloud is None:
+            if not self.has_scene_content():
                 super().mouseMoveEvent(event)
                 return
 
@@ -4665,7 +5099,7 @@ class PointCloudGLWidget(QOpenGLWidget):
             super().mouseMoveEvent(event)
             return
 
-        if self._cloud is None or self._last_mouse_pos is None:
+        if not self.has_scene_content() or self._last_mouse_pos is None:
             self._last_mouse_pos = event.pos()
             super().mouseMoveEvent(event)
             return
@@ -4696,7 +5130,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        if self._cloud is None:
+        if not self.has_scene_content():
             super().wheelEvent(event)
             return
         if self._navigation_mode == "game":
@@ -4709,7 +5143,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         super().wheelEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if self._navigation_mode != "game" or self._cloud is None:
+        if self._navigation_mode != "game" or not self.has_scene_content():
             super().keyPressEvent(event)
             return
 
@@ -4805,7 +5239,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         return forward, right, up
 
     def _update_game_movement(self) -> None:
-        if self._navigation_mode != "game" or self._cloud is None:
+        if self._navigation_mode != "game" or not self.has_scene_content():
             self._move_timer.stop()
             return
 
@@ -4899,7 +5333,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         return "neutral"
 
     def _set_projection_view(self, yaw: float, pitch: float, up_axis: str = "y") -> None:
-        if self._cloud is None:
+        if not self.has_scene_content():
             return
         self._yaw = float(yaw)
         self._pitch = max(-90.0, min(90.0, float(pitch)))
@@ -5167,8 +5601,12 @@ class MainWindow(QMainWindow):
             bounding_box_color=APP_SETTINGS.bounding_box_color,
             bounding_box_line_width=APP_SETTINGS.bounding_box_line_width,
             bounding_box_show_id=APP_SETTINGS.bounding_box_show_id,
+            tin_render_mode=APP_SETTINGS.tin_render_mode,
+            tin_elevation_colormap=APP_SETTINGS.tin_elevation_colormap,
+            tin_smooth_normals=APP_SETTINGS.tin_smooth_normals,
         )
         self.current_cloud: Optional[PointCloudData] = None
+        self._mesh_source_path: str = ""
         self._split_module = None
         self._synthetic_module = None
         self._dbscan_module = None
@@ -5181,9 +5619,10 @@ class MainWindow(QMainWindow):
         self._last_dbscan_epsilon = 1.0
         self._last_dbscan_min_pts = 8
         self._last_dbscan_output_path = str(ensure_data_dir() / "dbscan_clusters.yaml")
-        self._last_tin_params = TINCommandParams()
+        self._last_tin_params = TINCommandParams(visual=project_tin_visual_settings(self._settings))
         self._last_tin_mesh: Optional[TINMesh] = None
         self._last_cluster_yaml_dir = str(ensure_data_dir())
+        self._last_mesh_open_dir = str(ensure_data_dir())
         self._last_view_image_dir = str(ensure_data_dir())
         self._last_mesh_export_dir = str(ensure_data_dir())
 
@@ -5218,6 +5657,14 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcut("Ctrl+O")
         self.open_action.setToolTip("Open TXT or PLY point cloud")
         self.open_action.triggered.connect(self.open_file_dialog)
+
+        self.open_mesh_action = QAction(
+            self._icon("open_mesh", QStyle.SP_DialogOpenButton),
+            "Open Mesh File",
+            self,
+        )
+        self.open_mesh_action.setToolTip("Open a PLY triangle mesh")
+        self.open_mesh_action.triggered.connect(self.open_mesh_file_dialog)
 
         self.open_clusters_action = QAction(
             self._icon("open_clusters", QStyle.SP_DirOpenIcon),
@@ -5277,13 +5724,13 @@ class MainWindow(QMainWindow):
             self,
         )
         self.clear_viewport_action.setToolTip(
-            "Remove the current point cloud and any cluster bounding boxes from the viewport"
+            "Remove the current point cloud, mesh, and any cluster bounding boxes from the viewport"
         )
         self.clear_viewport_action.setEnabled(False)
         self.clear_viewport_action.triggered.connect(self.clear_viewport)
 
         self.fit_action = QAction(self._icon("fit", QStyle.SP_ArrowUp), "Fit to View", self)
-        self.fit_action.setToolTip("Frame the whole cloud in the viewport")
+        self.fit_action.setToolTip("Frame the whole scene in the viewport")
         self.fit_action.setEnabled(False)
         self.fit_action.triggered.connect(self.fit_to_view)
 
@@ -5361,7 +5808,7 @@ class MainWindow(QMainWindow):
             "Save Mesh as PLY...",
             self,
         )
-        self.save_mesh_ply_action.setToolTip("Save the current TIN surface mesh to a PLY file")
+        self.save_mesh_ply_action.setToolTip("Save the current surface mesh to a PLY file")
         self.save_mesh_ply_action.setEnabled(False)
         self.save_mesh_ply_action.triggered.connect(self.save_current_mesh_as_ply)
 
@@ -5379,6 +5826,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.clear_viewport_action)
         file_menu.addSeparator()
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.open_mesh_action)
         file_menu.addAction(self.open_clusters_action)
         file_menu.addSeparator()
         file_menu.addAction(self.save_cloud_ply_action)
@@ -5426,6 +5874,7 @@ class MainWindow(QMainWindow):
             f"QToolButton {{ min-width: {icon_px + 10}px; min-height: {icon_px + 10}px; }}"
         )
         toolbar.addAction(self.open_action)
+        toolbar.addAction(self.open_mesh_action)
         toolbar.addAction(self.open_clusters_action)
         toolbar.addAction(self.save_cloud_ply_action)
         toolbar.addAction(self.save_mesh_ply_action)
@@ -5465,6 +5914,7 @@ class MainWindow(QMainWindow):
         persist: bool,
         update_recent_paths: bool,
     ) -> None:
+        normalized_tin_visual = project_tin_visual_settings(settings)
         normalized = ProjectSettings(
             output_directory=display_output_directory(resolve_output_directory(settings.output_directory)),
             point_size=_clamp_point_size(settings.point_size),
@@ -5473,6 +5923,9 @@ class MainWindow(QMainWindow):
             bounding_box_color=normalize_color_value(settings.bounding_box_color),
             bounding_box_line_width=_clamp_bounding_box_line_width(settings.bounding_box_line_width),
             bounding_box_show_id=_coerce_bool_setting(settings.bounding_box_show_id),
+            tin_render_mode=normalized_tin_visual.render_mode,
+            tin_elevation_colormap=normalized_tin_visual.elevation_colormap,
+            tin_smooth_normals=normalized_tin_visual.smooth_normals,
         )
 
         self._settings = normalized
@@ -5483,6 +5936,9 @@ class MainWindow(QMainWindow):
         APP_SETTINGS.bounding_box_color = normalized.bounding_box_color
         APP_SETTINGS.bounding_box_line_width = normalized.bounding_box_line_width
         APP_SETTINGS.bounding_box_show_id = normalized.bounding_box_show_id
+        APP_SETTINGS.tin_render_mode = normalized.tin_render_mode
+        APP_SETTINGS.tin_elevation_colormap = normalized.tin_elevation_colormap
+        APP_SETTINGS.tin_smooth_normals = normalized.tin_smooth_normals
 
         output_dir = ensure_data_dir()
         if update_recent_paths:
@@ -5501,6 +5957,15 @@ class MainWindow(QMainWindow):
             color=normalized.bounding_box_color,
             line_width=normalized.bounding_box_line_width,
             show_id=normalized.bounding_box_show_id,
+        )
+        self.gl_widget.set_surface_display_settings(
+            render_mode=normalized.tin_render_mode,
+            elevation_colormap=normalized.tin_elevation_colormap,
+            smooth_normals=normalized.tin_smooth_normals,
+        )
+        self._last_tin_params = normalize_command_params(
+            self._last_tin_params,
+            visual=normalized_tin_visual,
         )
 
         if persist:
@@ -5534,6 +5999,38 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.load_file(path)
+
+    def open_mesh_file_dialog(self) -> None:
+        start_dir = self._last_mesh_open_dir
+        if self._mesh_source_path:
+            start_dir = str(Path(self._mesh_source_path).resolve().parent)
+        elif self.current_cloud is not None and self.current_cloud.file_path:
+            start_dir = str(Path(self.current_cloud.file_path).resolve().parent)
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Mesh File",
+            start_dir,
+            "PLY Mesh Files (*.ply);;PLY Files (*.ply);;All Files (*)",
+        )
+        if path:
+            self.load_mesh_file(path)
+
+    def load_mesh_file(self, path: str) -> None:
+        try:
+            mesh = MeshLoader.load_ply(path)
+        except MeshLoaderError as exc:
+            QMessageBox.critical(self, "Load Error", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Load Error", f"Unexpected error while loading mesh file:\n{exc}")
+            return
+
+        self._apply_mesh(mesh, path)
+        self.statusBar().showMessage(
+            f"Mesh loaded: {path} | Vertices: {mesh.vertices.shape[0]:,} | Triangles: {mesh.triangles.shape[0]:,}",
+            7000,
+        )
 
     def load_file(self, path: str) -> None:
         try:
@@ -5644,6 +6141,11 @@ class MainWindow(QMainWindow):
             stem = current_path.stem.strip()
             if stem:
                 return str(ensure_data_dir() / f"{stem}_view.png")
+        if self._mesh_source_path:
+            stem = Path(self._mesh_source_path).stem.strip()
+            if stem:
+                safe_stem = re.sub(r"[\/:*?\"<>|]+", "_", stem)
+                return str(Path(self._last_view_image_dir) / f"{safe_stem}_view.png")
         return str(Path(self._last_view_image_dir) / "current_view.png")
 
     def _default_cloud_export_path(self) -> str:
@@ -5658,8 +6160,13 @@ class MainWindow(QMainWindow):
         if self.current_cloud is not None and self.current_cloud.file_path:
             stem = Path(self.current_cloud.file_path).stem.strip()
             if stem:
-                safe_stem = re.sub(r"[\\/:*?\"<>|]+", "_", stem)
+                safe_stem = re.sub(r"[\/:*?\"<>|]+", "_", stem)
                 return str(ensure_data_dir() / f"{safe_stem}_tin_mesh.ply")
+        if self._mesh_source_path:
+            stem = Path(self._mesh_source_path).stem.strip()
+            if stem:
+                safe_stem = re.sub(r"[\/:*?\"<>|]+", "_", stem)
+                return str(Path(self._last_mesh_export_dir) / f"{safe_stem}_mesh_export.ply")
         return str(Path(self._last_mesh_export_dir) / "tin_mesh_export.ply")
 
     def _cluster_boxes_from_result(self, result) -> Tuple[ClusterBoundingBoxData, ...]:
@@ -5820,7 +6327,10 @@ class MainWindow(QMainWindow):
         if dialog.exec_() != QDialog.Accepted:
             return
 
-        params = dialog.params()
+        params = normalize_command_params(
+            dialog.params(),
+            visual=project_tin_visual_settings(self._settings),
+        )
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -5840,6 +6350,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         self._last_tin_params = result.params
+        self._mesh_source_path = ""
         self._last_tin_mesh = result.mesh
         self.gl_widget.set_surface_mesh(
             result.mesh.vertices,
@@ -5857,7 +6368,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "No Mesh",
-                "Build a TIN surface mesh first. This command saves only triangulated meshes, not point clouds or cluster boxes.",
+                "Open or build a surface mesh first. This command saves only triangulated meshes, not point clouds or cluster boxes.",
             )
             return
 
@@ -5881,11 +6392,11 @@ class MainWindow(QMainWindow):
             return
 
         self._last_mesh_export_dir = str(out_path.parent)
-        self.statusBar().showMessage(f"Saved TIN mesh: {out_path}", 7000)
+        self.statusBar().showMessage(f"Saved mesh: {out_path}", 7000)
 
     def save_current_view_as_png(self) -> None:
-        if self.current_cloud is None:
-            QMessageBox.information(self, "No Cloud", "Open a point cloud first.")
+        if self.current_cloud is None and not self.gl_widget.has_surface_mesh():
+            QMessageBox.information(self, "No Scene", "Open a point cloud or mesh first.")
             return
 
         path, _ = QFileDialog.getSaveFileName(
@@ -5931,6 +6442,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_cloud = None
+        self._mesh_source_path = ""
         self._last_tin_mesh = None
         self._cluster_boxes = ()
         self._cluster_source_path = ""
@@ -6271,7 +6783,9 @@ class MainWindow(QMainWindow):
 
     def _update_view_actions_enabled(self, cloud: Optional[PointCloudData]) -> None:
         has_cloud = cloud is not None and cloud.loaded_count > 0
-        has_viewport_content = has_cloud or bool(self._cluster_boxes) or self.gl_widget.has_surface_mesh()
+        has_surface_mesh = self.gl_widget.has_surface_mesh()
+        has_scene = has_cloud or has_surface_mesh
+        has_viewport_content = has_scene or bool(self._cluster_boxes)
         for action in (
             self.fit_action,
             self.reset_action,
@@ -6284,21 +6798,23 @@ class MainWindow(QMainWindow):
             self.view_front_iso_action,
             self.game_navigation_action,
         ):
-            action.setEnabled(has_cloud)
+            action.setEnabled(has_scene)
 
-        if not has_cloud and self.game_navigation_action.isChecked():
+        if not has_scene and self.game_navigation_action.isChecked():
             self.game_navigation_action.blockSignals(True)
             self.game_navigation_action.setChecked(False)
             self.game_navigation_action.blockSignals(False)
 
         self.toggle_rgb_action.setEnabled(bool(has_cloud and cloud is not None and cloud.has_rgb))
         self.save_cloud_ply_action.setEnabled(has_cloud)
-        self.save_mesh_ply_action.setEnabled(bool(self.gl_widget.has_surface_mesh()))
+        self.save_mesh_ply_action.setEnabled(bool(has_surface_mesh and self._last_tin_mesh is not None))
+        self.save_view_png_action.setEnabled(has_scene)
         self.tin_action.setEnabled(has_cloud)
         self.clear_viewport_action.setEnabled(has_viewport_content)
 
     def _apply_cloud(self, cloud: PointCloudData) -> None:
         self.current_cloud = cloud
+        self._mesh_source_path = ""
         self._last_tin_mesh = None
         self.gl_widget.set_point_cloud(cloud)
         self.gl_widget.reset_view()
@@ -6314,7 +6830,36 @@ class MainWindow(QMainWindow):
         self.split_action.setEnabled(cloud.has_labels)
         self.dbscan_action.setEnabled(cloud.loaded_count > 0)
         self.tin_action.setEnabled(cloud.loaded_count > 0)
-        self.save_view_png_action.setEnabled(cloud.loaded_count > 0)
+        self._update_status_bar()
+
+    def _apply_mesh(self, mesh: TINMesh, source_path: str) -> None:
+        resolved_path = str(Path(source_path).resolve())
+        parent_dir = str(Path(resolved_path).parent)
+
+        self.current_cloud = None
+        self._mesh_source_path = resolved_path
+        self._last_tin_mesh = mesh
+        self._cluster_boxes = ()
+        self._cluster_source_path = ""
+        self._last_mesh_open_dir = parent_dir
+        self._last_mesh_export_dir = parent_dir
+        self._last_view_image_dir = parent_dir
+
+        self.gl_widget.clear_viewport()
+        self.gl_widget.set_surface_mesh(
+            mesh.vertices,
+            mesh.triangles,
+            render_mode=self._settings.tin_render_mode,
+            elevation_colormap=self._settings.tin_elevation_colormap,
+            smooth_normals=self._settings.tin_smooth_normals,
+        )
+        self.gl_widget.reset_view()
+        self.gl_widget.set_color_mode("neutral")
+
+        self._update_view_actions_enabled(None)
+        self.split_action.setEnabled(False)
+        self.dbscan_action.setEnabled(False)
+        self.tin_action.setEnabled(False)
         self._update_status_bar()
 
     def _get_synthetic_module(self):
@@ -6446,8 +6991,16 @@ class MainWindow(QMainWindow):
 
     def _update_status_bar(self) -> None:
         cluster_text = f" | Clusters: {len(self._cluster_boxes)}" if self._cluster_boxes else ""
-        surface_text = " | Surface: TIN" if self.gl_widget.has_surface_mesh() else ""
+        nav_label = self.gl_widget.active_navigation_mode_label()
+        surface_text = " | Surface: Mesh" if self.gl_widget.has_surface_mesh() else ""
         if self.current_cloud is None:
+            if self.gl_widget.has_surface_mesh() and self._last_tin_mesh is not None:
+                mesh_name = os.path.basename(self._mesh_source_path) or "<mesh>"
+                self.statusBar().showMessage(
+                    f"Mesh: {mesh_name} | Vertices: {self._last_tin_mesh.vertices.shape[0]:,} | "
+                    f"Triangles: {self._last_tin_mesh.triangles.shape[0]:,} | Nav: {nav_label}{cluster_text}"
+                )
+                return
             if self._cluster_source_path:
                 source_name = os.path.basename(self._cluster_source_path) or "<clusters>"
                 self.statusBar().showMessage(f"No file loaded{cluster_text}{surface_text} | Overlay: {source_name}")
@@ -6457,7 +7010,6 @@ class MainWindow(QMainWindow):
 
         file_name = os.path.basename(self.current_cloud.file_path) or "<unknown>"
         mode_label = self.gl_widget.active_color_mode_label()
-        nav_label = self.gl_widget.active_navigation_mode_label()
         self.statusBar().showMessage(
             f"File: {file_name} | Points: {self.current_cloud.loaded_count:,} / "
             f"{self.current_cloud.original_count:,} | Color: {mode_label} | Nav: {nav_label}"
@@ -6470,7 +7022,7 @@ class MainWindow(QMainWindow):
             "About MagicPoints",
             "MagicPoints\n\n"
             "Features:\n"
-            "- TXT/PLY loading (ASCII and binary PLY)\n"
+            "- TXT point-cloud loading and PLY point-cloud/mesh loading\n"
             "- OpenGL VBO rendering\n"
             "- Label and RGB color modes\n"
             "- DBSCAN clustering with YAML bounding-box overlays\n"
