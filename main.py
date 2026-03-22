@@ -971,6 +971,10 @@ class TINDialog(QDialog):
         self._cloud_name = str(cloud_name).strip() or "<in-memory point cloud>"
         self._point_count = max(0, int(point_count))
         self._default_params = normalize_command_params(default_params)
+        self._factory_default_params = normalize_command_params(
+            TINCommandParams(),
+            visual=self._default_params.visual,
+        )
 
         self.cloud_edit = QLineEdit(self)
         self.cloud_edit.setReadOnly(True)
@@ -1063,6 +1067,21 @@ class TINDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.restore_defaults_button = buttons.addButton(
+            "Restore Defaults",
+            QDialogButtonBox.ActionRole,
+        )
+        self.restore_defaults_button.clicked.connect(self.restore_defaults)
+        self.import_config_button = buttons.addButton(
+            "Import Configuration...",
+            QDialogButtonBox.ActionRole,
+        )
+        self.import_config_button.clicked.connect(self.import_configuration)
+        self.export_config_button = buttons.addButton(
+            "Export Configuration...",
+            QDialogButtonBox.ActionRole,
+        )
+        self.export_config_button.clicked.connect(self.export_configuration)
         self.ok_button = buttons.button(QDialogButtonBox.Ok)
 
         content = QWidget(self)
@@ -1097,6 +1116,7 @@ class TINDialog(QDialog):
         return spin
 
     def _populate_combo(self, combo: QComboBox, options, selected_value: str) -> None:
+        combo.clear()
         current_index = 0
         for index, (label, value) in enumerate(options):
             combo.addItem(label, value)
@@ -1225,6 +1245,145 @@ class TINDialog(QDialog):
             )
         )
 
+    def restore_defaults(self) -> None:
+        self._apply_params(self._factory_default_params)
+
+    def _apply_params(self, params: TINCommandParams) -> None:
+        normalized = normalize_command_params(params, visual=self._default_params.visual)
+        algorithm = normalized.algorithm
+
+        self.coincidence_tolerance_spin.setValue(float(algorithm.coincidence_tolerance))
+        self._populate_combo(
+            self.duplicate_handling_combo,
+            (
+                ("Keep first", "keep_first"),
+                ("Average duplicates", "average"),
+                ("Remove duplicates", "remove"),
+            ),
+            algorithm.duplicate_handling,
+        )
+        self.max_edge_length_spin.setValue(float(algorithm.max_edge_length))
+        self.min_angle_spin.setValue(float(algorithm.min_angle))
+        self.max_angle_spin.setValue(float(algorithm.max_angle))
+        self.outlier_filter_spin.setValue(float(algorithm.outlier_filter))
+        self._populate_combo(
+            self.boundary_type_combo,
+            (
+                ("Convex hull", "convex_hull"),
+                ("Concave hull", "concave_hull"),
+                ("Custom polygon", "custom"),
+            ),
+            algorithm.boundary_type,
+        )
+        self.alpha_spin.setValue(float(algorithm.alpha))
+        self.custom_boundary_edit.setText(normalized.custom_boundary_path)
+        self._populate_combo(
+            self.interpolation_combo,
+            (
+                ("Linear", "linear"),
+                ("Natural neighbor (approx.)", "natural_neighbor"),
+            ),
+            algorithm.interpolation_method,
+        )
+        self.mesh_resolution_spin.setValue(float(algorithm.mesh_resolution))
+        self.max_points_spin.setValue(int(algorithm.max_points))
+        self._populate_combo(
+            self.spatial_index_combo,
+            (
+                ("KD-tree", "kdtree"),
+                ("R-tree", "rtree"),
+            ),
+            algorithm.spatial_index,
+        )
+        self._update_dependent_fields()
+        self._update_preview()
+
+    def _validation_error(self) -> Tuple[str, str] | None:
+        try:
+            params = self.params()
+        except Exception as exc:  # noqa: BLE001
+            return ("Invalid Settings", str(exc))
+
+        if params.algorithm.boundary_type == "custom":
+            path = params.custom_boundary_path
+            if not path:
+                return (
+                    "Missing Boundary",
+                    "Choose a custom boundary TXT/PLY file when custom boundary mode is enabled.",
+                )
+            if not Path(path).is_file():
+                return (
+                    "Missing Boundary",
+                    "The selected custom boundary file does not exist.",
+                )
+
+        return None
+
+    def export_configuration(self) -> None:
+        validation_error = self._validation_error()
+        if validation_error is not None:
+            QMessageBox.warning(
+                self,
+                "Export Error",
+                "Configuration cannot be exported because current settings are invalid:\n"
+                + validation_error[1],
+            )
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export TIN Configuration",
+            str(ensure_data_dir() / "tin_settings.yaml"),
+            "YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not path:
+            return
+
+        out_path = Path(path)
+        if out_path.suffix.lower() not in {".yaml", ".yml"}:
+            out_path = out_path.with_suffix(".yaml")
+
+        payload = asdict(self.params())
+        payload.pop("visual", None)
+
+        try:
+            out_path.write_text(
+                yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"Failed to save TIN configuration:\n{exc}",
+            )
+            return
+
+    def import_configuration(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import TIN Configuration",
+            str(ensure_data_dir()),
+            "YAML Files (*.yaml *.yml);;All Files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            config_data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+            if not isinstance(config_data, Mapping):
+                raise ValueError("TIN configuration must be a mapping.")
+            self._apply_params(
+                normalize_command_params(config_data, visual=self._default_params.visual)
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Import Error",
+                f"Failed to load TIN configuration:\n{exc}",
+            )
+            return
+
     def _update_dependent_fields(self) -> None:
         boundary_type = self._selected_value(self.boundary_type_combo)
         use_alpha = boundary_type == "concave_hull"
@@ -1232,7 +1391,6 @@ class TINDialog(QDialog):
         self.alpha_spin.setEnabled(use_alpha)
         self.custom_boundary_edit.setEnabled(use_custom_boundary)
         self.custom_boundary_browse.setEnabled(use_custom_boundary)
-
 
     def _update_preview(self) -> None:
         boundary_type = self._selected_value(self.boundary_type_combo)
@@ -1266,36 +1424,9 @@ class TINDialog(QDialog):
         self.preview_label.setText(preview)
 
     def accept(self) -> None:
-        boundary_type = self._selected_value(self.boundary_type_combo)
-        if self.min_angle_spin.value() >= self.max_angle_spin.value():
-            QMessageBox.warning(
-                self,
-                "Invalid Angles",
-                "Minimum triangle angle must be smaller than maximum triangle angle.",
-            )
-            return
-
-        if boundary_type == "custom":
-            path = self.custom_boundary_path()
-            if not path:
-                QMessageBox.warning(
-                    self,
-                    "Missing Boundary",
-                    "Choose a custom boundary TXT/PLY file when custom boundary mode is enabled.",
-                )
-                return
-            if not Path(path).is_file():
-                QMessageBox.warning(
-                    self,
-                    "Missing Boundary",
-                    "The selected custom boundary file does not exist.",
-                )
-                return
-
-        try:
-            self.params()
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Invalid Settings", str(exc))
+        validation_error = self._validation_error()
+        if validation_error is not None:
+            QMessageBox.warning(self, validation_error[0], validation_error[1])
             return
 
         super().accept()
@@ -2396,7 +2527,7 @@ class SyntheticGenerationDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Generate Synthetic Point Cloud")
+        self.setWindowTitle("Generate Exterior Synthetic Cloud...")
         self.setModal(True)
         self._synthetic_module = synthetic_module
 
@@ -2481,6 +2612,26 @@ class SyntheticGenerationDialog(QDialog):
             values=params.vehicle_type_percentages,
             class_count=len(self._vehicle_types),
             fallback=fallback_vehicle_percentages,
+        )
+        self._default_generation_params = SyntheticGenerationParams(
+            class_percentages=tuple(fallback_percentages),
+            artificial_surface_type_percentages=tuple(fallback_artificial_surface_percentages),
+            building_roof_type_percentages=tuple(fallback_building_roof_percentages),
+            building_floor_min=int(self._building_defaults["building_floor_min"]),
+            building_floor_max=int(self._building_defaults["building_floor_max"]),
+            building_random_yaw=bool(self._building_defaults["building_random_yaw"]),
+            structure_type_percentages=tuple(fallback_structure_percentages),
+            tree_crown_type_percentages=tuple(fallback_tree_crown_percentages),
+            tree_max_crown_diameter=float(self._high_veg_defaults["tree_max_crown_diameter"]),
+            tree_max_crown_top_height=float(self._high_veg_defaults["tree_max_crown_top_height"]),
+            tree_min_crown_bottom_height=float(self._high_veg_defaults["tree_min_crown_bottom_height"]),
+            vehicle_type_percentages=tuple(fallback_vehicle_percentages),
+            shrub_max_diameter=float(self._low_veg_defaults["shrub_max_diameter"]),
+            shrub_max_top_height=float(self._low_veg_defaults["shrub_max_top_height"]),
+            shrub_min_bottom_height=float(self._low_veg_defaults["shrub_min_bottom_height"]),
+            grass_patch_max_size_x=float(self._low_veg_defaults["grass_patch_max_size_x"]),
+            grass_patch_max_size_y=float(self._low_veg_defaults["grass_patch_max_size_y"]),
+            grass_max_height=float(self._low_veg_defaults["grass_max_height"]),
         )
         default_floor_min = int(self._building_defaults["building_floor_min"])
         default_floor_max = int(self._building_defaults["building_floor_max"])
@@ -3051,6 +3202,11 @@ class SyntheticGenerationDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self.restore_defaults_button = buttons.addButton(
+            "Restore Defaults",
+            QDialogButtonBox.ActionRole,
+        )
+        self.restore_defaults_button.clicked.connect(self.restore_defaults)
         self.import_config_button = buttons.addButton(
             "Import Configuration...",
             QDialogButtonBox.ActionRole,
@@ -3097,6 +3253,9 @@ class SyntheticGenerationDialog(QDialog):
             return None
         self._synthetic_module = synthetic_module
         return self._synthetic_module
+
+    def restore_defaults(self) -> None:
+        self._apply_params(self._default_generation_params)
 
     def _apply_params(self, params: SyntheticGenerationParams) -> None:
         def _set_spin_value(spin_box, value, name: str) -> None:
