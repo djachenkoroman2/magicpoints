@@ -6,5 +6,5 @@ bounding_box_color: '#AA55FF'
 bounding_box_line_width: 3.0
 bounding_box_show_id: true
 mesh_render_mode: shaded
-mesh_elevation_colormap: viridis
+mesh_elevation_colormap: terrain
 mesh_smooth_normals: true

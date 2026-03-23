@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import yaml
@@ -70,6 +70,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QOpenGLWidget,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QTabWidget,
@@ -82,7 +83,8 @@ from PyQt5.QtWidgets import (
 
 from utils.tin_alg import TINMesh, TINParameters, export_mesh_to_ply, normalize_tin_parameters
 
-DEFAULT_MAX_POINTS = 2_000_000
+DEFAULT_OPEN_POINT_CLOUD_DOWNSAMPLE_LIMIT = 200_000
+DEFAULT_MAX_POINTS = DEFAULT_OPEN_POINT_CLOUD_DOWNSAMPLE_LIMIT
 DEFAULT_POINT_SIZE = 3.0
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / "data"
@@ -347,6 +349,19 @@ def ensure_data_dir() -> Path:
 
 def normalize_field_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.strip().lower())
+
+
+LoadProgressCallback = Callable[[float, str], None]
+
+
+def _emit_load_progress(
+    progress_callback: Optional[LoadProgressCallback],
+    progress: float,
+    stage: str,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(float(min(1.0, max(0.0, progress))), str(stage).strip())
 
 
 def normalize_vector(v: np.ndarray) -> np.ndarray:
@@ -704,6 +719,122 @@ class SplitByLabelDialog(QDialog):
             )
             return
         super().accept()
+
+
+class PointCloudOpenDialog(QDialog):
+    def __init__(
+        self,
+        analysis: "PointCloudPlyAnalysis",
+        default_downsample_limit: int,
+        default_downsample_enabled: bool,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Open Point Cloud")
+        self.setModal(True)
+        self.resize(640, 360)
+
+        file_edit = QLineEdit(self)
+        file_edit.setReadOnly(True)
+        file_edit.setText(analysis.file_path)
+
+        format_edit = QLineEdit(self)
+        format_edit.setReadOnly(True)
+        format_edit.setText(analysis.format_type)
+
+        points_edit = QLineEdit(self)
+        points_edit.setReadOnly(True)
+        points_edit.setText(f"{analysis.point_count:,}")
+
+        rgb_edit = QLineEdit(self)
+        rgb_edit.setReadOnly(True)
+        rgb_edit.setText("Yes" if analysis.has_rgb else "No")
+
+        fields_label = QLabel(analysis.formatted_fields(), self)
+        fields_label.setWordWrap(True)
+        fields_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        analysis_form = QFormLayout()
+        analysis_form.addRow("File:", file_edit)
+        analysis_form.addRow("Format:", format_edit)
+        analysis_form.addRow("Points:", points_edit)
+        analysis_form.addRow("RGB:", rgb_edit)
+        analysis_form.addRow("Fields:", fields_label)
+
+        analysis_group = QGroupBox("PLY Analysis", self)
+        analysis_group.setLayout(analysis_form)
+
+        self.scalar_field_combo = QComboBox(self)
+        if analysis.scalar_fields:
+            for prop in analysis.scalar_fields:
+                self.scalar_field_combo.addItem(f"{prop.name} ({prop.dtype})", prop.name)
+            if analysis.default_scalar_field_name:
+                index = self.scalar_field_combo.findData(analysis.default_scalar_field_name)
+                if index >= 0:
+                    self.scalar_field_combo.setCurrentIndex(index)
+        else:
+            self.scalar_field_combo.addItem("No scalar fields found", None)
+            self.scalar_field_combo.setEnabled(False)
+
+        self.downsample_checkbox = QCheckBox("Apply downsampling before load", self)
+        self.downsample_checkbox.setChecked(bool(default_downsample_enabled))
+
+        self.downsample_spin = QSpinBox(self)
+        self.downsample_spin.setRange(3, 1_000_000_000)
+        self.downsample_spin.setSingleStep(10_000)
+        self.downsample_spin.setValue(max(3, int(default_downsample_limit)))
+        self.downsample_spin.setEnabled(self.downsample_checkbox.isChecked())
+        self.downsample_checkbox.toggled.connect(self.downsample_spin.setEnabled)
+
+        downsample_row = QHBoxLayout()
+        downsample_row.addWidget(self.downsample_checkbox)
+        downsample_row.addWidget(self.downsample_spin)
+        downsample_row.addWidget(QLabel("points", self))
+        downsample_row.addStretch(1)
+
+        if analysis.scalar_fields:
+            scalar_hint_text = "The selected scalar field will be loaded into the scene as label and saved back as label."
+        else:
+            scalar_hint_text = (
+                "No scalar fields were found. RGB/label mode switching will stay unavailable until labels appear later."
+            )
+        scalar_hint = QLabel(scalar_hint_text, self)
+        scalar_hint.setWordWrap(True)
+
+        options_form = QFormLayout()
+        options_form.addRow("Scalar field:", self.scalar_field_combo)
+        options_form.addRow("Downsampling:", downsample_row)
+        options_form.addRow("Notes:", scalar_hint)
+
+        options_group = QGroupBox("Load Options", self)
+        options_group.setLayout(options_form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(analysis_group)
+        layout.addWidget(options_group)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+    def selected_scalar_field_name(self) -> Optional[str]:
+        value = self.scalar_field_combo.currentData()
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+    def downsampling_enabled(self) -> bool:
+        return self.downsample_checkbox.isChecked()
+
+    def downsample_limit(self) -> int:
+        return int(self.downsample_spin.value())
+
+    def effective_downsample_limit(self) -> Optional[int]:
+        if not self.downsampling_enabled():
+            return None
+        return self.downsample_limit()
 
 
 class DBSCANDialog(QDialog):
@@ -1447,6 +1578,27 @@ class PlyElement:
     properties: List[PlyProperty]
 
 
+@dataclass(frozen=True)
+class PointCloudPlyAnalysis:
+    file_path: str
+    format_type: str
+    point_count: int
+    vertex_properties: Tuple[PlyProperty, ...]
+    scalar_fields: Tuple[PlyProperty, ...]
+    has_rgb: bool
+    default_scalar_field_name: Optional[str] = None
+
+    def formatted_fields(self) -> str:
+        formatted: List[str] = []
+        for prop in self.vertex_properties:
+            if prop.kind == "scalar":
+                formatted.append(f"{prop.name} ({prop.dtype})")
+            else:
+                count_dtype = prop.count_dtype or "?"
+                formatted.append(f"{prop.name} (list {count_dtype} {prop.dtype})")
+        return ", ".join(formatted) if formatted else "No vertex fields found"
+
+
 class PointCloudLoader:
     LABEL_FIELD_NAMES = [
         "label",
@@ -1494,185 +1646,281 @@ class PointCloudLoader:
         "double": "f8",
         "float64": "f8",
     }
+    RESERVED_VERTEX_FIELD_NAMES = {"x", "y", "z", "red", "green", "blue", "r", "g", "b"}
 
     @classmethod
-    def load(cls, path: str, max_points: int = DEFAULT_MAX_POINTS) -> Tuple[PointCloudData, bool]:
-        if max_points <= 0:
+    def analyze_ply(cls, path: str) -> PointCloudPlyAnalysis:
+        if not os.path.isfile(path):
+            raise PointCloudLoaderError(f"File not found: {path}")
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext != ".ply":
+            raise PointCloudLoaderError(f"Unsupported file extension '{ext}'. Use PLY.")
+
+        with open(path, "rb") as fh:
+            format_type, elements = cls._parse_ply_header(fh)
+
+        vertex_element = cls._point_cloud_vertex_element(elements)
+        scalar_fields, has_rgb, default_scalar_field_name = cls._analyze_vertex_properties(vertex_element.properties)
+        return PointCloudPlyAnalysis(
+            file_path=path,
+            format_type=format_type,
+            point_count=int(vertex_element.count),
+            vertex_properties=tuple(vertex_element.properties),
+            scalar_fields=scalar_fields,
+            has_rgb=has_rgb,
+            default_scalar_field_name=default_scalar_field_name,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        path: str,
+        max_points: Optional[int] = None,
+        scalar_field_name: Optional[str] = None,
+        progress_callback: Optional[LoadProgressCallback] = None,
+    ) -> Tuple[PointCloudData, bool]:
+        if max_points is not None and max_points <= 0:
             raise PointCloudLoaderError("Point threshold must be a positive integer.")
         if not os.path.isfile(path):
             raise PointCloudLoaderError(f"File not found: {path}")
 
         ext = os.path.splitext(path)[1].lower()
-        if ext == ".txt":
-            cloud = cls._load_txt(path)
-        elif ext == ".ply":
-            cloud = cls._load_ply(path)
-        else:
-            raise PointCloudLoaderError(f"Unsupported file extension '{ext}'. Use TXT or PLY.")
+        if ext != ".ply":
+            raise PointCloudLoaderError(f"Unsupported file extension '{ext}'. Use PLY.")
 
+        cloud = cls._load_ply(
+            path,
+            scalar_field_name=scalar_field_name,
+            progress_callback=progress_callback,
+        )
         cloud.file_path = path
         cloud.original_count = cloud.loaded_count
 
-        if cloud.loaded_count > max_points:
+        if max_points is not None and cloud.loaded_count > max_points:
             rng = np.random.default_rng()
-            indices = rng.choice(cloud.loaded_count, size=max_points, replace=False)
+            indices = np.sort(rng.choice(cloud.loaded_count, size=max_points, replace=False))
             cloud = cloud.subset(indices)
             cloud.file_path = path
+            _emit_load_progress(progress_callback, 1.0, "Downsampling complete")
             return cloud, True
 
+        _emit_load_progress(progress_callback, 1.0, "Load complete")
         return cloud, False
 
     @classmethod
-    def _load_txt(cls, path: str) -> PointCloudData:
-        rows: List[List[float]] = []
-        header_tokens: Optional[List[str]] = None
-        ncols: Optional[int] = None
-
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-            for line_number, raw_line in enumerate(fh, start=1):
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                tokens = [token for token in re.split(r"[,\s]+", line) if token]
-                if not tokens:
-                    continue
-
-                numeric_values: List[float] = []
-                numeric_ok = True
-                for token in tokens:
-                    try:
-                        numeric_values.append(float(token))
-                    except ValueError:
-                        numeric_ok = False
-                        break
-
-                if not numeric_ok:
-                    if header_tokens is None and not rows:
-                        header_tokens = [normalize_field_name(token) for token in tokens]
-                        continue
-                    raise PointCloudLoaderError(
-                        f"Unable to parse numeric data in TXT at line {line_number}: '{raw_line.rstrip()}'"
-                    )
-
-                if ncols is None:
-                    ncols = len(numeric_values)
-                elif len(numeric_values) != ncols:
-                    raise PointCloudLoaderError(
-                        f"Inconsistent column count in TXT at line {line_number}: "
-                        f"expected {ncols}, found {len(numeric_values)}."
-                    )
-
-                rows.append(numeric_values)
-
-        if not rows:
-            raise PointCloudLoaderError("TXT file does not contain point records.")
-
-        matrix = np.asarray(rows, dtype=np.float32)
-        if matrix.shape[1] < 3:
-            raise PointCloudLoaderError("TXT data must contain at least 3 columns for XYZ coordinates.")
-
-        return cls._extract_channels_from_matrix(matrix, header_tokens)
-
-    @classmethod
-    def _load_ply(cls, path: str) -> PointCloudData:
+    def _load_ply(
+        cls,
+        path: str,
+        scalar_field_name: Optional[str] = None,
+        progress_callback: Optional[LoadProgressCallback] = None,
+    ) -> PointCloudData:
+        file_size = max(1, int(os.path.getsize(path)))
         with open(path, "rb") as fh:
-            first = fh.readline().decode("ascii", errors="ignore").strip()
-            if first.lower() != "ply":
-                raise PointCloudLoaderError("Invalid PLY file: missing 'ply' magic header.")
-
-            format_type: Optional[str] = None
-            elements: List[PlyElement] = []
-            current_element: Optional[PlyElement] = None
-
-            while True:
-                line = fh.readline()
-                if not line:
-                    raise PointCloudLoaderError("Unexpected end of file while reading PLY header.")
-                text = line.decode("ascii", errors="ignore").strip()
-                if text == "end_header":
-                    break
-                if not text:
-                    continue
-
-                parts = text.split()
-                keyword = parts[0].lower()
-                if keyword in {"comment", "obj_info"}:
-                    continue
-                if keyword == "format":
-                    if len(parts) < 2:
-                        raise PointCloudLoaderError("Malformed PLY format declaration.")
-                    format_type = parts[1].lower()
-                elif keyword == "element":
-                    if len(parts) != 3:
-                        raise PointCloudLoaderError(f"Malformed PLY element declaration: '{text}'")
-                    try:
-                        count = int(parts[2])
-                    except ValueError as exc:
-                        raise PointCloudLoaderError(f"Invalid element count in PLY header: '{parts[2]}'") from exc
-                    current_element = PlyElement(name=parts[1], count=count, properties=[])
-                    elements.append(current_element)
-                elif keyword == "property":
-                    if current_element is None:
-                        raise PointCloudLoaderError("PLY property declared before any element.")
-                    if len(parts) >= 5 and parts[1].lower() == "list":
-                        current_element.properties.append(
-                            PlyProperty(
-                                kind="list",
-                                count_dtype=parts[2].lower(),
-                                dtype=parts[3].lower(),
-                                name=parts[4],
-                            )
-                        )
-                    elif len(parts) == 3:
-                        current_element.properties.append(
-                            PlyProperty(kind="scalar", dtype=parts[1].lower(), name=parts[2])
-                        )
-                    else:
-                        raise PointCloudLoaderError(f"Malformed PLY property declaration: '{text}'")
-
-            if format_type is None:
-                raise PointCloudLoaderError("PLY header missing format declaration.")
-            if format_type not in {"ascii", "binary_little_endian", "binary_big_endian"}:
-                raise PointCloudLoaderError(f"Unsupported PLY format '{format_type}'.")
-
-            face_element = next(
-                (element for element in elements if element.name.lower() == "face" and element.count > 0),
-                None,
-            )
-            if face_element is not None:
-                raise PointCloudLoaderError(
-                    "PLY file contains face data and represents a mesh. Use File -> Open Mesh File instead."
-                )
+            format_type, elements = cls._parse_ply_header(fh)
+            vertex_element = cls._point_cloud_vertex_element(elements)
+            cls._analyze_vertex_properties(vertex_element.properties)
+            cls._report_stream_progress(fh, file_size, progress_callback, "Reading PLY header")
 
             vertex_columns: Optional[Dict[str, np.ndarray]] = None
             if format_type == "ascii":
                 for element in elements:
                     keep = element.name.lower() == "vertex"
-                    columns = cls._read_ascii_element(fh, element, keep=keep)
+                    columns = cls._read_ascii_element(
+                        fh,
+                        element,
+                        keep=keep,
+                        file_size=file_size,
+                        progress_callback=progress_callback,
+                        stage=("Reading point data" if keep else f"Skipping {element.name} data"),
+                    )
                     if keep:
                         vertex_columns = columns
             else:
                 endian = "<" if format_type == "binary_little_endian" else ">"
                 for element in elements:
                     keep = element.name.lower() == "vertex"
-                    columns = cls._read_binary_element(fh, element, endian=endian, keep=keep)
+                    columns = cls._read_binary_element(
+                        fh,
+                        element,
+                        endian=endian,
+                        keep=keep,
+                        file_size=file_size,
+                        progress_callback=progress_callback,
+                        stage=("Reading point data" if keep else f"Skipping {element.name} data"),
+                    )
                     if keep:
                         vertex_columns = columns
 
             if vertex_columns is None:
                 raise PointCloudLoaderError("PLY file does not contain a 'vertex' element.")
-            return cls._extract_channels_from_ply_columns(vertex_columns)
+            return cls._extract_channels_from_ply_columns(vertex_columns, scalar_field_name=scalar_field_name)
+
+    @classmethod
+    def _parse_ply_header(cls, fh) -> Tuple[str, List[PlyElement]]:
+        first = fh.readline().decode("ascii", errors="ignore").strip()
+        if first.lower() != "ply":
+            raise PointCloudLoaderError("Invalid PLY file: missing 'ply' magic header.")
+
+        format_type: Optional[str] = None
+        elements: List[PlyElement] = []
+        current_element: Optional[PlyElement] = None
+
+        while True:
+            line = fh.readline()
+            if not line:
+                raise PointCloudLoaderError("Unexpected end of file while reading PLY header.")
+            text = line.decode("ascii", errors="ignore").strip()
+            if text == "end_header":
+                break
+            if not text:
+                continue
+
+            parts = text.split()
+            keyword = parts[0].lower()
+            if keyword in {"comment", "obj_info"}:
+                continue
+            if keyword == "format":
+                if len(parts) < 2:
+                    raise PointCloudLoaderError("Malformed PLY format declaration.")
+                format_type = parts[1].lower()
+            elif keyword == "element":
+                if len(parts) != 3:
+                    raise PointCloudLoaderError(f"Malformed PLY element declaration: '{text}'")
+                try:
+                    count = int(parts[2])
+                except ValueError as exc:
+                    raise PointCloudLoaderError(f"Invalid element count in PLY header: '{parts[2]}'") from exc
+                current_element = PlyElement(name=parts[1], count=count, properties=[])
+                elements.append(current_element)
+            elif keyword == "property":
+                if current_element is None:
+                    raise PointCloudLoaderError("PLY property declared before any element.")
+                if len(parts) >= 5 and parts[1].lower() == "list":
+                    current_element.properties.append(
+                        PlyProperty(
+                            kind="list",
+                            count_dtype=parts[2].lower(),
+                            dtype=parts[3].lower(),
+                            name=parts[4],
+                        )
+                    )
+                elif len(parts) == 3:
+                    current_element.properties.append(
+                        PlyProperty(kind="scalar", dtype=parts[1].lower(), name=parts[2])
+                    )
+                else:
+                    raise PointCloudLoaderError(f"Malformed PLY property declaration: '{text}'")
+
+        if format_type is None:
+            raise PointCloudLoaderError("PLY header missing format declaration.")
+        if format_type not in {"ascii", "binary_little_endian", "binary_big_endian"}:
+            raise PointCloudLoaderError(f"Unsupported PLY format '{format_type}'.")
+        return format_type, elements
+
+    @classmethod
+    def _point_cloud_vertex_element(cls, elements: Sequence[PlyElement]) -> PlyElement:
+        face_element = next(
+            (element for element in elements if element.name.lower() == "face" and element.count > 0),
+            None,
+        )
+        if face_element is not None:
+            raise PointCloudLoaderError(
+                "PLY file contains face data and represents a mesh. Use File -> Open Mesh File instead."
+            )
+
+        vertex_element = next((element for element in elements if element.name.lower() == "vertex"), None)
+        if vertex_element is None:
+            raise PointCloudLoaderError("PLY file does not contain a 'vertex' element.")
+        return vertex_element
+
+    @classmethod
+    def _analyze_vertex_properties(
+        cls,
+        properties: Sequence[PlyProperty],
+    ) -> Tuple[Tuple[PlyProperty, ...], bool, Optional[str]]:
+        scalar_properties = tuple(prop for prop in properties if prop.kind == "scalar")
+        normalized_to_original = {
+            normalize_field_name(prop.name): prop.name
+            for prop in scalar_properties
+        }
+
+        x_name = cls._pick_original_name(normalized_to_original, "x")
+        y_name = cls._pick_original_name(normalized_to_original, "y")
+        z_name = cls._pick_original_name(normalized_to_original, "z")
+        if x_name is None or y_name is None or z_name is None:
+            raise PointCloudLoaderError("PLY vertex data does not provide required x/y/z fields.")
+
+        has_rgb = (
+            cls._pick_original_name(normalized_to_original, "red", "r") is not None
+            and cls._pick_original_name(normalized_to_original, "green", "g") is not None
+            and cls._pick_original_name(normalized_to_original, "blue", "b") is not None
+        )
+
+        scalar_fields = tuple(
+            prop
+            for prop in scalar_properties
+            if normalize_field_name(prop.name) not in cls.RESERVED_VERTEX_FIELD_NAMES
+        )
+        default_scalar_field_name = cls._default_scalar_field_name([prop.name for prop in scalar_fields])
+        return scalar_fields, has_rgb, default_scalar_field_name
+
+    @classmethod
+    def _default_scalar_field_name(cls, field_names: Sequence[str]) -> Optional[str]:
+        normalized_to_original = {normalize_field_name(name): name for name in field_names}
+        for candidate in cls.LABEL_FIELD_NAMES:
+            hit = normalized_to_original.get(candidate)
+            if hit is not None:
+                return hit
+        return field_names[0] if field_names else None
+
+    @staticmethod
+    def _pick_original_name(normalized_to_original: Dict[str, str], *keys: str) -> Optional[str]:
+        for key in keys:
+            hit = normalized_to_original.get(key)
+            if hit is not None:
+                return hit
+        return None
+
+    @staticmethod
+    def _progress_row_interval(count: int) -> int:
+        if count <= 0:
+            return 1
+        return max(1, min(8192, count // 200 or 1))
+
+    @classmethod
+    def _report_stream_progress(
+        cls,
+        fh,
+        file_size: int,
+        progress_callback: Optional[LoadProgressCallback],
+        stage: str,
+    ) -> None:
+        if progress_callback is None or file_size <= 0:
+            return
+        try:
+            position = int(fh.tell())
+        except (OSError, ValueError):
+            return
+        _emit_load_progress(progress_callback, position / float(file_size), stage)
 
     @classmethod
     def _read_ascii_element(
-        cls, fh, element: PlyElement, keep: bool
+        cls,
+        fh,
+        element: PlyElement,
+        keep: bool,
+        file_size: int = 0,
+        progress_callback: Optional[LoadProgressCallback] = None,
+        stage: str = "Reading data",
     ) -> Optional[Dict[str, np.ndarray]]:
         scalar_data: Dict[str, List[float]] = {}
         if keep:
             for prop in element.properties:
                 if prop.kind == "scalar":
                     scalar_data[prop.name] = []
+
+        report_interval = cls._progress_row_interval(element.count)
 
         for row_index in range(element.count):
             line = fh.readline()
@@ -1713,13 +1961,23 @@ class PointCloudLoader:
                             f"List property overflow in ASCII PLY row {row_index}."
                         )
 
+            if (row_index + 1) % report_interval == 0 or (row_index + 1) == element.count:
+                cls._report_stream_progress(fh, file_size, progress_callback, stage)
+
         if not keep:
             return None
         return {name: np.asarray(values, dtype=np.float64) for name, values in scalar_data.items()}
 
     @classmethod
     def _read_binary_element(
-        cls, fh, element: PlyElement, endian: str, keep: bool
+        cls,
+        fh,
+        element: PlyElement,
+        endian: str,
+        keep: bool,
+        file_size: int = 0,
+        progress_callback: Optional[LoadProgressCallback] = None,
+        stage: str = "Reading data",
     ) -> Optional[Dict[str, np.ndarray]]:
         scalar_only = all(prop.kind == "scalar" for prop in element.properties)
 
@@ -1731,14 +1989,30 @@ class PointCloudLoader:
                     raise PointCloudLoaderError(f"Unsupported PLY type '{prop.dtype}' in element '{element.name}'.")
                 dtype_fields.append((prop.name, np.dtype(np_type).newbyteorder(endian)))
             structured_dtype = np.dtype(dtype_fields)
-            array = np.fromfile(fh, dtype=structured_dtype, count=element.count)
-            if array.size != element.count:
-                raise PointCloudLoaderError(
-                    f"Unexpected EOF while reading binary PLY element '{element.name}'."
-                )
+            remaining = int(element.count)
+            chunk_size = max(1, min(131072, remaining))
+            chunks: List[np.ndarray] = []
+
+            while remaining > 0:
+                count = min(chunk_size, remaining)
+                array = np.fromfile(fh, dtype=structured_dtype, count=count)
+                if array.size != count:
+                    raise PointCloudLoaderError(
+                        f"Unexpected EOF while reading binary PLY element '{element.name}'."
+                    )
+                if keep:
+                    chunks.append(array)
+                remaining -= count
+                cls._report_stream_progress(fh, file_size, progress_callback, stage)
+
             if not keep:
                 return None
-            return {name: np.asarray(array[name], dtype=np.float64) for name in array.dtype.names or []}
+
+            if chunks:
+                combined = np.concatenate(chunks)
+            else:
+                combined = np.empty(0, dtype=structured_dtype)
+            return {name: np.asarray(combined[name], dtype=np.float64) for name in combined.dtype.names or []}
 
         scalar_names = [prop.name for prop in element.properties if prop.kind == "scalar"]
         scalar_data = (
@@ -1746,6 +2020,7 @@ class PointCloudLoader:
             if keep
             else {}
         )
+        report_interval = cls._progress_row_interval(element.count)
 
         for row_index in range(element.count):
             for prop in element.properties:
@@ -1764,6 +2039,9 @@ class PointCloudLoader:
                             raise PointCloudLoaderError(
                                 f"Unexpected EOF while skipping binary list data in element '{element.name}'."
                             )
+
+            if (row_index + 1) % report_interval == 0 or (row_index + 1) == element.count:
+                cls._report_stream_progress(fh, file_size, progress_callback, stage)
 
         return scalar_data if keep else None
 
@@ -1787,15 +2065,15 @@ class PointCloudLoader:
         return struct.calcsize(fmt_char)
 
     @classmethod
-    def _extract_channels_from_ply_columns(cls, columns: Dict[str, np.ndarray]) -> PointCloudData:
+    def _extract_channels_from_ply_columns(
+        cls,
+        columns: Dict[str, np.ndarray],
+        scalar_field_name: Optional[str] = None,
+    ) -> PointCloudData:
         normalized_to_original = {normalize_field_name(name): name for name in columns.keys()}
 
         def pick(*keys: str) -> Optional[str]:
-            for key in keys:
-                hit = normalized_to_original.get(key)
-                if hit is not None:
-                    return hit
-            return None
+            return cls._pick_original_name(normalized_to_original, *keys)
 
         x_name = pick("x")
         y_name = pick("y")
@@ -1819,75 +2097,24 @@ class PointCloudLoader:
             ).astype(np.float32, copy=False)
             rgb = cls._normalize_rgb(rgb)
 
-        label_name = None
-        for candidate in cls.LABEL_FIELD_NAMES:
-            label_name = normalized_to_original.get(candidate)
-            if label_name is not None:
-                break
         labels = None
-        if label_name is not None:
+        selected_label_name = scalar_field_name
+        if selected_label_name is None:
+            scalar_fields, _, default_scalar_field_name = cls._analyze_vertex_properties(
+                [PlyProperty(kind="scalar", dtype="float", name=name) for name in columns.keys()]
+            )
+            if scalar_fields:
+                selected_label_name = default_scalar_field_name
+
+        if selected_label_name is not None:
+            label_name = normalized_to_original.get(normalize_field_name(selected_label_name))
+            if label_name is None:
+                raise PointCloudLoaderError(
+                    f"Selected scalar field '{selected_label_name}' was not found in PLY vertex data."
+                )
             labels = np.rint(columns[label_name]).astype(np.int32)
 
         return PointCloudData(points=points, labels=labels, rgb=rgb)
-
-    @classmethod
-    def _extract_channels_from_matrix(
-        cls, matrix: np.ndarray, header_tokens: Optional[List[str]] = None
-    ) -> PointCloudData:
-        col_count = matrix.shape[1]
-        if col_count < 3:
-            raise PointCloudLoaderError("Point data must contain at least 3 columns for XYZ.")
-
-        xyz_idx = [0, 1, 2]
-        rgb_idx: Optional[List[int]] = None
-        label_idx: Optional[int] = None
-
-        if header_tokens is not None and len(header_tokens) == col_count:
-            indexed = {normalize_field_name(name): idx for idx, name in enumerate(header_tokens)}
-            if {"x", "y", "z"}.issubset(indexed):
-                xyz_idx = [indexed["x"], indexed["y"], indexed["z"]]
-            if {"red", "green", "blue"}.issubset(indexed):
-                rgb_idx = [indexed["red"], indexed["green"], indexed["blue"]]
-            elif {"r", "g", "b"}.issubset(indexed):
-                rgb_idx = [indexed["r"], indexed["g"], indexed["b"]]
-            for candidate in cls.LABEL_FIELD_NAMES:
-                if candidate in indexed:
-                    label_idx = indexed[candidate]
-                    break
-        else:
-            if col_count >= 6 and cls._looks_like_rgb(matrix[:, 3:6]):
-                rgb_idx = [3, 4, 5]
-                if col_count >= 7:
-                    label_idx = 6
-            elif col_count >= 4:
-                label_idx = 3
-
-        points = matrix[:, xyz_idx].astype(np.float32, copy=False)
-        rgb = None
-        if rgb_idx is not None:
-            rgb = matrix[:, rgb_idx].astype(np.float32, copy=False)
-            rgb = cls._normalize_rgb(rgb)
-
-        labels = None
-        if label_idx is not None and 0 <= label_idx < col_count:
-            labels = np.rint(matrix[:, label_idx]).astype(np.int32)
-
-        return PointCloudData(points=points, labels=labels, rgb=rgb)
-
-    @staticmethod
-    def _looks_like_rgb(rgb_values: np.ndarray) -> bool:
-        if rgb_values.shape[1] != 3:
-            return False
-        if not np.all(np.isfinite(rgb_values)):
-            return False
-        min_val = float(np.min(rgb_values))
-        max_val = float(np.max(rgb_values))
-        if min_val < -1e-4 or max_val > 255.0 + 1e-3:
-            return False
-        if max_val <= 1.0 + 1e-4:
-            return True
-        near_int = np.abs(rgb_values - np.round(rgb_values)) < 1e-3
-        return float(np.mean(near_int)) > 0.98
 
     @staticmethod
     def _normalize_rgb(rgb: np.ndarray) -> np.ndarray:
@@ -1904,7 +2131,11 @@ class MeshLoader:
     SUPPORTED_FORMATS = {"ascii", "binary_little_endian", "binary_big_endian"}
 
     @classmethod
-    def load_ply(cls, path: str) -> TINMesh:
+    def load_ply(
+        cls,
+        path: str,
+        progress_callback: Optional[LoadProgressCallback] = None,
+    ) -> TINMesh:
         if not os.path.isfile(path):
             raise MeshLoaderError(f"File not found: {path}")
 
@@ -1913,6 +2144,7 @@ class MeshLoader:
             raise MeshLoaderError(f"Unsupported file extension '{ext}'. Use PLY.")
 
         try:
+            file_size = max(1, int(os.path.getsize(path)))
             with open(path, "rb") as fh:
                 first = fh.readline().decode("ascii", errors="ignore").strip()
                 if first.lower() != "ply":
@@ -1972,6 +2204,12 @@ class MeshLoader:
                     raise MeshLoaderError("PLY header missing format declaration.")
                 if format_type not in cls.SUPPORTED_FORMATS:
                     raise MeshLoaderError(f"Unsupported PLY format '{format_type}'.")
+                PointCloudLoader._report_stream_progress(
+                    fh,
+                    file_size,
+                    progress_callback,
+                    "Reading PLY header",
+                )
 
                 vertex_element = next((element for element in elements if element.name.lower() == "vertex"), None)
                 if vertex_element is None:
@@ -1991,7 +2229,14 @@ class MeshLoader:
                     for element in elements:
                         name = element.name.lower()
                         if name == "vertex":
-                            columns = PointCloudLoader._read_ascii_element(fh, element, keep=True)
+                            columns = PointCloudLoader._read_ascii_element(
+                                fh,
+                                element,
+                                keep=True,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage="Reading mesh vertices",
+                            )
                             assert columns is not None
                             vertices = cls._vertices_from_columns(columns)
                         elif name == "face":
@@ -2004,15 +2249,32 @@ class MeshLoader:
                                 element,
                                 face_index_property,
                                 vertices.shape[0],
+                                file_size=file_size,
+                                progress_callback=progress_callback,
                             )
                         else:
-                            PointCloudLoader._read_ascii_element(fh, element, keep=False)
+                            PointCloudLoader._read_ascii_element(
+                                fh,
+                                element,
+                                keep=False,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage=f"Skipping {element.name} data",
+                            )
                 else:
                     endian = "<" if format_type == "binary_little_endian" else ">"
                     for element in elements:
                         name = element.name.lower()
                         if name == "vertex":
-                            columns = PointCloudLoader._read_binary_element(fh, element, endian=endian, keep=True)
+                            columns = PointCloudLoader._read_binary_element(
+                                fh,
+                                element,
+                                endian=endian,
+                                keep=True,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage="Reading mesh vertices",
+                            )
                             assert columns is not None
                             vertices = cls._vertices_from_columns(columns)
                         elif name == "face":
@@ -2026,9 +2288,19 @@ class MeshLoader:
                                 endian,
                                 face_index_property,
                                 vertices.shape[0],
+                                file_size=file_size,
+                                progress_callback=progress_callback,
                             )
                         else:
-                            PointCloudLoader._read_binary_element(fh, element, endian=endian, keep=False)
+                            PointCloudLoader._read_binary_element(
+                                fh,
+                                element,
+                                endian=endian,
+                                keep=False,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage=f"Skipping {element.name} data",
+                            )
 
                 if vertices is None or vertices.shape[0] == 0:
                     raise MeshLoaderError("PLY mesh does not contain any vertices.")
@@ -2036,6 +2308,8 @@ class MeshLoader:
                     raise MeshLoaderError("PLY mesh does not contain any triangular faces.")
         except PointCloudLoaderError as exc:
             raise MeshLoaderError(str(exc)) from exc
+
+        _emit_load_progress(progress_callback, 1.0, "Mesh load complete")
 
         return TINMesh(
             vertices=vertices,
@@ -2091,9 +2365,12 @@ class MeshLoader:
         element: PlyElement,
         face_index_property: PlyProperty,
         vertex_count: int,
+        file_size: int = 0,
+        progress_callback: Optional[LoadProgressCallback] = None,
     ) -> np.ndarray:
         triangles = np.empty((element.count, 3), dtype=np.int32)
         target_name = normalize_field_name(face_index_property.name)
+        report_interval = PointCloudLoader._progress_row_interval(element.count)
 
         for row_index in range(element.count):
             line = fh.readline()
@@ -2141,6 +2418,14 @@ class MeshLoader:
                 raise MeshLoaderError(f"PLY face row {row_index + 1} does not provide vertex indices.")
             triangles[row_index] = triangle
 
+            if (row_index + 1) % report_interval == 0 or (row_index + 1) == element.count:
+                PointCloudLoader._report_stream_progress(
+                    fh,
+                    file_size,
+                    progress_callback,
+                    "Reading mesh faces",
+                )
+
         return triangles
 
     @classmethod
@@ -2151,9 +2436,12 @@ class MeshLoader:
         endian: str,
         face_index_property: PlyProperty,
         vertex_count: int,
+        file_size: int = 0,
+        progress_callback: Optional[LoadProgressCallback] = None,
     ) -> np.ndarray:
         triangles = np.empty((element.count, 3), dtype=np.int32)
         target_name = normalize_field_name(face_index_property.name)
+        report_interval = PointCloudLoader._progress_row_interval(element.count)
 
         for row_index in range(element.count):
             triangle: Optional[Tuple[int, int, int]] = None
@@ -2182,6 +2470,14 @@ class MeshLoader:
             if triangle is None:
                 raise MeshLoaderError(f"PLY face row {row_index + 1} does not provide vertex indices.")
             triangles[row_index] = triangle
+
+            if (row_index + 1) % report_interval == 0 or (row_index + 1) == element.count:
+                PointCloudLoader._report_stream_progress(
+                    fh,
+                    file_size,
+                    progress_callback,
+                    "Reading mesh faces",
+                )
 
         return triangles
 
@@ -4952,11 +5248,10 @@ class PointCloudGLWidget(QOpenGLWidget):
         self.update()
 
     def toggle_rgb_mode(self) -> None:
-        if not self.has_rgb_data():
+        if not self.has_rgb_data() or not self.has_label_data():
             return
         if self._color_mode == "rgb":
-            fallback = "label" if self.has_label_data() else "neutral"
-            self.set_color_mode(fallback)
+            self.set_color_mode("label")
         else:
             self.set_color_mode("rgb")
 
@@ -5781,6 +6076,9 @@ class MainWindow(QMainWindow):
         self._last_tin_params = TINCommandParams(visual=project_tin_visual_settings(self._settings))
         self._last_tin_mesh: Optional[TINMesh] = None
         self._last_cluster_yaml_dir = str(ensure_data_dir())
+        self._last_point_cloud_open_dir = str(ensure_data_dir())
+        self._last_point_cloud_downsample_enabled = False
+        self._last_point_cloud_downsample_limit = max(3, int(self.max_points))
         self._last_mesh_open_dir = str(ensure_data_dir())
         self._last_view_image_dir = str(ensure_data_dir())
         self._last_mesh_export_dir = str(ensure_data_dir())
@@ -5799,6 +6097,17 @@ class MainWindow(QMainWindow):
         self._create_actions()
         self._create_menus()
         self._create_toolbar()
+        self._status_progress_message = ""
+        self._status_progress_last_value = -1
+        self._status_progress_last_update = 0.0
+        self._status_progress_bar = QProgressBar(self)
+        self._status_progress_bar.setRange(0, 100)
+        self._status_progress_bar.setValue(0)
+        self._status_progress_bar.setTextVisible(True)
+        self._status_progress_bar.setFormat("%p%")
+        self._status_progress_bar.setMinimumWidth(150)
+        self._status_progress_bar.hide()
+        self.statusBar().addPermanentWidget(self._status_progress_bar)
         self.statusBar().showMessage("No file loaded")
 
     def _icon(self, name: str, fallback: QStyle.StandardPixmap) -> QIcon:
@@ -5807,6 +6116,58 @@ class MainWindow(QMainWindow):
             return QIcon(str(icon_path))
         return self.style().standardIcon(fallback)
 
+    def _begin_status_progress(self, message: str, *, indeterminate: bool = False) -> None:
+        self._status_progress_message = str(message).strip()
+        self._status_progress_last_value = -1
+        self._status_progress_last_update = 0.0
+        if indeterminate:
+            self._status_progress_bar.setRange(0, 0)
+            self._status_progress_bar.setTextVisible(False)
+        else:
+            self._status_progress_bar.setRange(0, 100)
+            self._status_progress_bar.setValue(0)
+            self._status_progress_bar.setTextVisible(True)
+            self._status_progress_bar.setFormat("%p%")
+        self._status_progress_bar.show()
+        self.statusBar().showMessage(self._status_progress_message)
+        QApplication.processEvents()
+
+    def _update_status_progress(self, progress: float, stage: str = "") -> None:
+        if not self._status_progress_bar.isVisible():
+            return
+
+        if self._status_progress_bar.maximum() == 0:
+            self._status_progress_bar.setRange(0, 100)
+            self._status_progress_bar.setTextVisible(True)
+            self._status_progress_bar.setFormat("%p%")
+
+        percent = int(round(min(1.0, max(0.0, float(progress))) * 100.0))
+        now = time.monotonic()
+        if percent == self._status_progress_last_value and (now - self._status_progress_last_update) < 0.05:
+            return
+
+        self._status_progress_last_value = percent
+        self._status_progress_last_update = now
+        self._status_progress_bar.setValue(percent)
+
+        stage_text = str(stage).strip()
+        if stage_text:
+            self.statusBar().showMessage(f"{self._status_progress_message}: {stage_text}")
+        else:
+            self.statusBar().showMessage(self._status_progress_message)
+        QApplication.processEvents()
+
+    def _finish_status_progress(self) -> None:
+        self._status_progress_message = ""
+        self._status_progress_last_value = -1
+        self._status_progress_last_update = 0.0
+        self._status_progress_bar.hide()
+        self._status_progress_bar.setRange(0, 100)
+        self._status_progress_bar.setValue(0)
+        self._status_progress_bar.setTextVisible(True)
+        self._status_progress_bar.setFormat("%p%")
+        QApplication.processEvents()
+
     def _create_actions(self) -> None:
         self.open_action = QAction(
             self._icon("open", QStyle.SP_DialogOpenButton),
@@ -5814,7 +6175,7 @@ class MainWindow(QMainWindow):
             self,
         )
         self.open_action.setShortcut("Ctrl+O")
-        self.open_action.setToolTip("Open TXT or PLY point cloud")
+        self.open_action.setToolTip("Open a PLY point cloud")
         self.open_action.triggered.connect(self.open_file_dialog)
 
         self.open_mesh_action = QAction(
@@ -6150,11 +6511,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Settings saved to {SETTINGS_PATH}", 5000)
 
     def open_file_dialog(self) -> None:
+        start_dir = self._last_point_cloud_open_dir
+        if self.current_cloud is not None and self.current_cloud.file_path:
+            current_path = Path(self.current_cloud.file_path)
+            if current_path.is_file() and current_path.suffix.lower() == ".ply":
+                start_dir = str(current_path.resolve().parent)
+
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Point Cloud",
-            str(ensure_data_dir()),
-            "Point Cloud Files (*.txt *.ply);;TXT Files (*.txt);;PLY Files (*.ply);;All Files (*)",
+            start_dir,
+            "PLY Point Cloud Files (*.ply);;PLY Files (*.ply);;All Files (*)",
         )
         if path:
             self.load_file(path)
@@ -6176,14 +6543,20 @@ class MainWindow(QMainWindow):
             self.load_mesh_file(path)
 
     def load_mesh_file(self, path: str) -> None:
+        self._begin_status_progress("Loading mesh")
         try:
-            mesh = MeshLoader.load_ply(path)
+            mesh = MeshLoader.load_ply(path, progress_callback=self._update_status_progress)
         except MeshLoaderError as exc:
+            self._finish_status_progress()
             QMessageBox.critical(self, "Load Error", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
             QMessageBox.critical(self, "Load Error", f"Unexpected error while loading mesh file:\n{exc}")
             return
+        finally:
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
 
         self._apply_mesh(mesh, path)
         self.statusBar().showMessage(
@@ -6193,7 +6566,7 @@ class MainWindow(QMainWindow):
 
     def load_file(self, path: str) -> None:
         try:
-            cloud, was_subsampled = PointCloudLoader.load(path, max_points=self.max_points)
+            analysis = PointCloudLoader.analyze_ply(path)
         except PointCloudLoaderError as exc:
             QMessageBox.critical(self, "Load Error", str(exc))
             return
@@ -6201,15 +6574,57 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Error", f"Unexpected error while loading file:\n{exc}")
             return
 
+        dialog = PointCloudOpenDialog(
+            analysis,
+            default_downsample_limit=self._last_point_cloud_downsample_limit,
+            default_downsample_enabled=(
+                self._last_point_cloud_downsample_enabled
+                and analysis.point_count > self._last_point_cloud_downsample_limit
+            ),
+            parent=self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        self._last_point_cloud_downsample_enabled = dialog.downsampling_enabled()
+        self._last_point_cloud_downsample_limit = dialog.downsample_limit()
+        downsample_limit = dialog.effective_downsample_limit()
+
+        self._begin_status_progress("Loading point cloud")
+        try:
+            cloud, was_subsampled = PointCloudLoader.load(
+                path,
+                max_points=downsample_limit,
+                scalar_field_name=dialog.selected_scalar_field_name(),
+                progress_callback=self._update_status_progress,
+            )
+        except PointCloudLoaderError as exc:
+            self._finish_status_progress()
+            QMessageBox.critical(self, "Load Error", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
+            QMessageBox.critical(self, "Load Error", f"Unexpected error while loading file:\n{exc}")
+            return
+        finally:
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
+
+        resolved_path = str(Path(path).resolve())
+        parent_dir = str(Path(resolved_path).parent)
+        self._last_point_cloud_open_dir = parent_dir
+        self._last_view_image_dir = parent_dir
+
         self._apply_cloud(cloud)
 
         if was_subsampled:
+            assert downsample_limit is not None
             QMessageBox.information(
                 self,
                 "Point Cloud Subsampled",
                 f"Original points: {cloud.original_count:,}\n"
                 f"Loaded points: {cloud.loaded_count:,}\n"
-                f"Sampling limit: {self.max_points:,}",
+                f"Sampling limit: {downsample_limit:,}",
             )
 
     def _default_split_prefix(self) -> str:
@@ -6377,15 +6792,20 @@ class MainWindow(QMainWindow):
         if dbscan_module is None:
             return
 
+        self._begin_status_progress("Loading clusters file", indeterminate=True)
         try:
             result = dbscan_module.load_cluster_result(path)
         except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
             QMessageBox.critical(
                 self,
                 "Cluster Load Error",
                 f"Failed to load clusters file:\n{exc}",
             )
             return
+        finally:
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
 
         self._apply_cluster_overlay(
             self._cluster_boxes_from_result(result),
@@ -6964,7 +7384,7 @@ class MainWindow(QMainWindow):
             self.game_navigation_action.setChecked(False)
             self.game_navigation_action.blockSignals(False)
 
-        self.toggle_rgb_action.setEnabled(bool(has_cloud and cloud is not None and cloud.has_rgb))
+        self.toggle_rgb_action.setEnabled(bool(has_cloud and cloud is not None and cloud.has_rgb and cloud.has_labels))
         self.save_cloud_ply_action.setEnabled(has_cloud)
         self.save_mesh_ply_action.setEnabled(bool(has_surface_mesh and self._last_tin_mesh is not None))
         self.save_view_png_action.setEnabled(has_scene)
@@ -7181,14 +7601,14 @@ class MainWindow(QMainWindow):
             "About MagicPoints",
             "MagicPoints\n\n"
             "Features:\n"
-            "- TXT point-cloud loading and PLY point-cloud/mesh loading\n"
+            "- PLY point-cloud loading with pre-load field analysis and PLY mesh loading\n"
             "- OpenGL VBO rendering\n"
             "- Label and RGB color modes\n"
             "- DBSCAN clustering with YAML bounding-box overlays\n"
             "- Orbit, pan, zoom camera controls\n"
             "- Optional game-style WASD + mouse navigation mode\n"
             "- Synthetic cloud generation with configurable parameters\n"
-            "- Automatic subsampling for very large clouds\n\n"
+            "- Optional downsampling during point-cloud open\n\n"
             "Copyright owner: Dyachenko Roman",
         )
 
@@ -7200,7 +7620,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--max-points",
         type=int,
         default=DEFAULT_MAX_POINTS,
-        help=f"Maximum number of points to load (default: {DEFAULT_MAX_POINTS:,}).",
+        help=(
+            "Initial point limit offered for point-cloud downsampling in the open dialog "
+            f"(default: {DEFAULT_MAX_POINTS:,})."
+        ),
     )
     return parser
 
