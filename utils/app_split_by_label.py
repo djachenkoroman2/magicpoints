@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import struct
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -27,6 +27,19 @@ DATA_DIR = PROJECT_DIR / "data"
 def ensure_data_dir() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR
+
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _emit_progress(
+    progress_callback: Optional[ProgressCallback],
+    progress: float,
+    stage: str = "",
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(float(min(1.0, max(0.0, progress))), str(stage).strip())
 
 
 def normalize_field_name(name: str) -> str:
@@ -622,6 +635,7 @@ def split_point_cloud_by_label_arrays(
     output_dir: str | Path,
     rgb: Optional[np.ndarray] = None,
     source_path: str = "",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> SplitResult:
     point_array = np.ascontiguousarray(np.asarray(points, dtype=np.float32))
     if point_array.ndim != 2 or point_array.shape[1] != 3:
@@ -653,19 +667,37 @@ def split_point_cloud_by_label_arrays(
     if unique_labels.size == 0:
         raise SplitInputError("Point cloud does not contain any label values.")
 
+    total_labels = int(unique_labels.size)
+    _emit_progress(progress_callback, 0.05, f"Preparing {total_labels} label file(s)")
+
     saved_files: List[SplitFileRecord] = []
-    for label in unique_labels:
+    for index, label in enumerate(unique_labels, start=1):
+        label_value = int(label)
+        start_progress = 0.05 + 0.90 * ((index - 1) / total_labels)
+        _emit_progress(
+            progress_callback,
+            start_progress,
+            f"Saving label {label_value} ({index}/{total_labels})",
+        )
         indices = np.flatnonzero(label_array == label)
         subset = cloud.subset(indices)
-        out_path = out_dir / f"{valid_prefix}_{int(label)}.ply"
+        out_path = out_dir / f"{valid_prefix}_{label_value}.ply"
         export_point_cloud_data_to_ply(subset, out_path)
         saved_files.append(
             SplitFileRecord(
-                label=int(label),
+                label=label_value,
                 point_count=int(indices.size),
                 output_path=str(out_path),
             )
         )
+        end_progress = 0.05 + 0.90 * (index / total_labels)
+        _emit_progress(
+            progress_callback,
+            end_progress,
+            f"Saved label {label_value} ({index}/{total_labels})",
+        )
+
+    _emit_progress(progress_callback, 1.0, "Complete")
 
     return SplitResult(
         prefix=valid_prefix,
@@ -680,6 +712,7 @@ def split_point_cloud_file(
     input_path: str | Path,
     prefix: Optional[str] = None,
     output_dir: str | Path | None = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> SplitResult:
     cloud = PointCloudLoader.load(input_path)
     if not cloud.has_labels or cloud.labels is None:
@@ -698,6 +731,7 @@ def split_point_cloud_file(
         output_dir=resolved_output_dir,
         rgb=cloud.rgb,
         source_path=str(input_path),
+        progress_callback=progress_callback,
     )
 
 

@@ -6,14 +6,14 @@ The script generates a procedural scene where each point has:
     x, y, z, label
 
 Labels:
-    0 - natural surface
-    1 - artificial surface
-    2 - low vegetation
-    3 - high vegetation
+    0 - artificial surface
+    1 - natural surface
+    2 - high vegetation
+    3 - low vegetation
     4 - buildings
     5 - structures
-    6 - vehicles
-    7 - artifacts
+    6 - artifacts
+    7 - vehicles
 """
 
 from __future__ import annotations
@@ -37,38 +37,46 @@ def ensure_data_dir() -> Path:
     return DATA_DIR
 
 
+ARTIFICIAL_SURFACE_CLASS_ID = 0
+NATURAL_SURFACE_CLASS_ID = 1
+HIGH_VEGETATION_CLASS_ID = 2
+LOW_VEGETATION_CLASS_ID = 3
+ARTIFACTS_CLASS_ID = 6
+VEHICLES_CLASS_ID = 7
+
+
 CLASS_NAMES: Dict[int, str] = {
-    0: "Natural surface",
-    1: "Artificial surface",
-    2: "Low vegetation",
-    3: "High vegetation",
+    ARTIFICIAL_SURFACE_CLASS_ID: "Artificial surface",
+    NATURAL_SURFACE_CLASS_ID: "Natural surface",
+    HIGH_VEGETATION_CLASS_ID: "High vegetation",
+    LOW_VEGETATION_CLASS_ID: "Low vegetation",
     4: "Buildings",
     5: "Structures",
-    6: "Vehicles",
-    7: "Artifacts",
+    ARTIFACTS_CLASS_ID: "Artifacts",
+    VEHICLES_CLASS_ID: "Vehicles",
 }
 
 CLASS_COLORS: Dict[int, Tuple[float, float, float]] = {
-    0: (0.55, 0.39, 0.22),  # brown
-    1: (0.35, 0.35, 0.35),  # asphalt gray
-    2: (0.35, 0.75, 0.30),  # light green
-    3: (0.05, 0.45, 0.12),  # dark green
+    ARTIFICIAL_SURFACE_CLASS_ID: (0.35, 0.35, 0.35),  # asphalt gray
+    NATURAL_SURFACE_CLASS_ID: (0.55, 0.39, 0.22),  # brown
+    HIGH_VEGETATION_CLASS_ID: (0.05, 0.45, 0.12),  # dark green
+    LOW_VEGETATION_CLASS_ID: (0.35, 0.75, 0.30),  # light green
     4: (0.82, 0.22, 0.18),  # red
     5: (0.85, 0.68, 0.20),  # yellow
-    6: (0.15, 0.40, 0.85),  # blue
-    7: (0.68, 0.18, 0.72),  # magenta
+    ARTIFACTS_CLASS_ID: (0.68, 0.18, 0.72),  # magenta
+    VEHICLES_CLASS_ID: (0.15, 0.40, 0.85),  # blue
 }
 
 CLASS_IDS: Tuple[int, ...] = tuple(sorted(CLASS_NAMES))
 DEFAULT_CLASS_RATIOS: Dict[int, float] = {
-    0: 0.38,
-    1: 0.13,
-    2: 0.16,
-    3: 0.14,
+    ARTIFICIAL_SURFACE_CLASS_ID: 0.13,
+    NATURAL_SURFACE_CLASS_ID: 0.38,
+    HIGH_VEGETATION_CLASS_ID: 0.14,
+    LOW_VEGETATION_CLASS_ID: 0.16,
     4: 0.10,
     5: 0.04,
-    6: 0.03,
-    7: 0.02,
+    ARTIFACTS_CLASS_ID: 0.02,
+    VEHICLES_CLASS_ID: 0.03,
 }
 DEFAULT_CLASS_PERCENTAGES: Tuple[float, ...] = tuple(
     DEFAULT_CLASS_RATIOS[class_id] * 100.0 for class_id in CLASS_IDS
@@ -1770,7 +1778,7 @@ def _sample_natural_terrain_points(
     forbidden_rects: Sequence[Rect],
     terrain_relief: float,
 ) -> np.ndarray:
-    """Sample terrain points while keeping class 0 out of artificial surface zones."""
+    """Sample terrain points while keeping natural-surface points out of artificial zones."""
     x_nat, y_nat = _sample_xy(
         rng,
         n=n_points,
@@ -1780,7 +1788,7 @@ def _sample_natural_terrain_points(
     )
     terrain_noise = 0.01 + 0.05 * float(terrain_relief)
     z_nat = terrain_fn(x_nat, y_nat) + rng.normal(0.0, terrain_noise, size=n_points)
-    labels = np.zeros(n_points, dtype=np.int32)
+    labels = np.full(n_points, NATURAL_SURFACE_CLASS_ID, dtype=np.int32)
     return np.column_stack((x_nat, y_nat, z_nat, labels))
 
 
@@ -1792,10 +1800,10 @@ def generate_terrain(
     artificial_zones: Sequence[Dict[str, object]] | None = None,
 ) -> Tuple[np.ndarray, Callable[[np.ndarray, np.ndarray], np.ndarray], List[Dict[str, object]]]:
     """
-    Generate natural terrain (class 0) and return:
+    Generate natural terrain (class 1) and return:
       - terrain points (N, 4)
       - terrain height function z=f(x,y)
-      - artificial zones metadata used to mask class 0 sampling
+      - artificial zones metadata used to mask class 1 sampling
     `terrain_relief` controls elevation amplitude in [0,1]:
       0 -> almost flat, 1 -> mountainous.
     """
@@ -2088,7 +2096,7 @@ def _generate_tree_points(
     x = np.concatenate([x_trunk, x_crown])
     y = np.concatenate([y_trunk, y_crown])
     z = np.concatenate([z_trunk, z_crown])
-    labels = np.full(x.size, 3, dtype=np.int32)
+    labels = np.full(x.size, HIGH_VEGETATION_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -4058,7 +4066,7 @@ def _generate_vehicle_points(
     z = base_z + local[:, 2] + rng.normal(0.0, 0.01, size=local.shape[0])
     z = np.maximum(z, base_z + 0.005)
 
-    labels = np.full(local.shape[0], 6, dtype=np.int32)
+    labels = np.full(local.shape[0], VEHICLES_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -4110,7 +4118,7 @@ def _generate_shrub_points(
     shrub_max_top_height: float,
     shrub_min_bottom_height: float,
 ) -> np.ndarray:
-    """Generate one shrub cluster (class 2) with crown-like geometry."""
+    """Generate one shrub cluster (class 3) with crown-like geometry."""
     if n_points <= 0:
         return np.empty((0, 4), dtype=np.float64)
 
@@ -4150,7 +4158,7 @@ def _generate_shrub_points(
     local_h = crown_bottom + rng.uniform(0.0, 1.0, size=n_points) * (crown_top - crown_bottom)
     z = ground + local_h + rng.normal(0.0, 0.01, size=n_points)
 
-    labels = np.full(n_points, 2, dtype=np.int32)
+    labels = np.full(n_points, LOW_VEGETATION_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -4165,7 +4173,7 @@ def _generate_grass_patch_points(
     grass_patch_max_size_y: float,
     grass_max_height: float,
 ) -> np.ndarray:
-    """Generate one grassy patch (class 2) as an anisotropic ellipse."""
+    """Generate one grassy patch (class 3) as an anisotropic ellipse."""
     if n_points <= 0:
         return np.empty((0, 4), dtype=np.float64)
 
@@ -4195,7 +4203,7 @@ def _generate_grass_patch_points(
     z = ground + rng.uniform(0.02, 1.0, size=n_points) * local_h_max
     z += rng.normal(0.0, 0.006, size=n_points)
 
-    labels = np.full(n_points, 2, dtype=np.int32)
+    labels = np.full(n_points, LOW_VEGETATION_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -4235,16 +4243,16 @@ def place_objects(
 ) -> Tuple[np.ndarray, List[Dict[str, object]]]:
     """
     Place all non-terrain classes and return:
-      - one (N, 4) array with classes 1..7
+      - one (N, 4) array with classes 0 and 2..7
       - generated artificial surface zones metadata
     Uses classes:
-      1 artificial surfaces
-      2 low vegetation
-      3 high vegetation
+      0 artificial surfaces
+      2 high vegetation
+      3 low vegetation
       4 buildings
       5 structures
-      6 vehicles
-      7 artifacts
+      6 artifacts
+      7 vehicles
     """
     rng = np.random.default_rng(seed)
     cloud_parts: List[np.ndarray] = []
@@ -4419,9 +4427,9 @@ def place_objects(
     artificial_rects: List[Rect] = [zone["rect"] for zone in artificial_zones]  # type: ignore[index]
 
     # ------------------------------------------------------------------
-    # Class 1: artificial surfaces
+    # Class 0: artificial surfaces
     # ------------------------------------------------------------------
-    n_artificial = int(points_per_class.get(1, 0))
+    n_artificial = int(points_per_class.get(ARTIFICIAL_SURFACE_CLASS_ID, 0))
     if n_artificial > 0 and artificial_zones:
         areas = [max(1e-6, rect[2] * rect[3]) for rect in artificial_rects]
         zone_counts = _split_count_by_weights(n_artificial, areas)
@@ -4436,15 +4444,15 @@ def place_objects(
             z0 = float(zone["z0"])  # type: ignore[index]
             roughness = 0.006 if surface_type in {"sidewalk", "platform"} else 0.010
             z = np.full(zone_n, z0) + rng.normal(0.0, roughness, size=zone_n)
-            labels = np.full(zone_n, 1, dtype=np.int32)
+            labels = np.full(zone_n, ARTIFICIAL_SURFACE_CLASS_ID, dtype=np.int32)
             zones_points.append(np.column_stack((x, y, z, labels)))
         if zones_points:
             cloud_parts.append(np.vstack(zones_points))
 
     # ------------------------------------------------------------------
-    # Class 3: high vegetation (trees)
+    # Class 2: high vegetation (trees)
     # ------------------------------------------------------------------
-    n_tree_points = int(points_per_class.get(3, 0))
+    n_tree_points = int(points_per_class.get(HIGH_VEGETATION_CLASS_ID, 0))
     if n_tree_points > 0:
         n_trees_eff = max(1, min(num_trees, n_tree_points))
         per_tree = _split_count_random(n_tree_points, n_trees_eff, rng=rng, min_per_chunk=8)
@@ -4568,9 +4576,9 @@ def place_objects(
             )
 
     # ------------------------------------------------------------------
-    # Class 6: vehicles (car / truck / bus on drivable artificial surfaces)
+    # Class 7: vehicles (car / truck / bus on drivable artificial surfaces)
     # ------------------------------------------------------------------
-    n_vehicle_points = int(points_per_class.get(6, 0))
+    n_vehicle_points = int(points_per_class.get(VEHICLES_CLASS_ID, 0))
     vehicle_zones = [zone for zone in artificial_zones if bool(zone.get("vehicle_allowed", False))]
     if not vehicle_zones:
         vehicle_zones = list(artificial_zones)
@@ -4639,9 +4647,9 @@ def place_objects(
             )
 
     # ------------------------------------------------------------------
-    # Class 2: low vegetation (shrubs + grassy patches)
+    # Class 3: low vegetation (shrubs + grassy patches)
     # ------------------------------------------------------------------
-    n_low_veg = int(points_per_class.get(2, 0))
+    n_low_veg = int(points_per_class.get(LOW_VEGETATION_CLASS_ID, 0))
     if n_low_veg > 0:
         low_veg_forbidden = artificial_rects + building_rects
         shrub_count_eff, grass_patch_count_eff = _resolve_low_veg_counts(
@@ -4727,9 +4735,9 @@ def place_objects(
                 cloud_parts.append(np.vstack(grass_parts))
 
     # ------------------------------------------------------------------
-    # Class 7: artifacts (small random clusters and isolated points)
+    # Class 6: artifacts (small random clusters and isolated points)
     # ------------------------------------------------------------------
-    n_artifacts = int(points_per_class.get(7, 0))
+    n_artifacts = int(points_per_class.get(ARTIFACTS_CLASS_ID, 0))
     if n_artifacts > 0:
         n_clusters = max(1, min(num_artifact_clusters, n_artifacts))
         per_cluster = _split_count_evenly(n_artifacts, n_clusters)
@@ -4740,7 +4748,7 @@ def place_objects(
             x = cx + rng.normal(0.0, spread, size=int(cluster_size))
             y = cy + rng.normal(0.0, spread, size=int(cluster_size))
             z = terrain_fn(x, y) + rng.uniform(0.0, 1.4, size=int(cluster_size))
-            labels = np.full(int(cluster_size), 7, dtype=np.int32)
+            labels = np.full(int(cluster_size), ARTIFACTS_CLASS_ID, dtype=np.int32)
             artifact_parts.append(np.column_stack((x, y, z, labels)))
         cloud_parts.append(np.vstack(artifact_parts))
 
@@ -5328,7 +5336,7 @@ def _run_pipeline(
         missing = total_points - point_cloud.shape[0]
         x_pad, y_pad = _sample_xy(rng, missing, area_size=area_size)
         z_pad = terrain_fn(x_pad, y_pad)
-        l_pad = np.zeros(missing, dtype=np.int32)
+        l_pad = np.full(missing, NATURAL_SURFACE_CLASS_ID, dtype=np.int32)
         point_cloud = np.vstack([point_cloud, np.column_stack((x_pad, y_pad, z_pad, l_pad))])
 
     labels = point_cloud[:, 3].astype(np.int32)
@@ -5390,7 +5398,7 @@ def generate_point_cloud(
       - no matplotlib window
       - no CSV/PLY files written
       - optional custom class percentages for classes 0..7
-      - optional custom number of artificial surface objects (class 1)
+      - optional custom number of artificial surface objects (class 0)
       - optional custom artificial surface type percentages
       - optional custom number of tree instances
       - optional custom tree crown type percentages
@@ -5598,13 +5606,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Optional custom class shares in percent for classes 0..7 "
             f"({len(CLASS_IDS)} values expected). "
-            "Example: --class-percentages 38 13 16 14 10 4 3 2"
+            "Example: --class-percentages 13 38 14 16 10 4 2 3"
         ),
     )
     parser.add_argument(
         "--artificial-surface-count",
         type=int,
-        help="Optional custom number of generated artificial surface objects (class 1).",
+        help="Optional custom number of generated artificial surface objects (class 0).",
     )
     parser.add_argument(
         "--artificial-surface-type-percentages",
@@ -5621,7 +5629,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tree-count",
         type=int,
-        help="Optional custom number of generated tree instances (class 3).",
+        help="Optional custom number of generated tree instances (class 2).",
     )
     parser.add_argument(
         "--tree-crown-type-percentages",
@@ -5728,7 +5736,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shrub-count",
         type=int,
-        help="Optional custom number of shrub clusters for class 2 (low vegetation).",
+        help="Optional custom number of shrub clusters for class 3 (low vegetation).",
     )
     parser.add_argument(
         "--random-shrub-size",
@@ -5760,7 +5768,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--grass-patch-count",
         type=int,
-        help="Optional custom number of grass patches for class 2 (low vegetation).",
+        help="Optional custom number of grass patches for class 3 (low vegetation).",
     )
     parser.add_argument(
         "--random-grass-patch-size",

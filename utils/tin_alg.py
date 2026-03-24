@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -37,6 +37,19 @@ try:
     from rtree import index as rtree_index
 except Exception:  # noqa: BLE001
     rtree_index = None
+
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _emit_progress(
+    progress_callback: Optional[ProgressCallback],
+    progress: float,
+    stage: str = "",
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(float(min(1.0, max(0.0, progress))), str(stage).strip())
 
 
 DUPLICATE_HANDLING_VALUES = ("keep_first", "average", "remove")
@@ -282,6 +295,7 @@ def build_tin_from_points(
     *,
     custom_boundary: str | Path | Sequence[Sequence[float]] | np.ndarray | None = None,
     output_path: str | Path | None = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> TINMesh:
     """
     Build a TIN mesh from in-memory XYZ points.
@@ -307,6 +321,7 @@ def build_tin_from_points(
         Mesh vertices and compact triangle indices ready for rendering or export.
     """
     _require_scipy()
+    _emit_progress(progress_callback, 0.02, "Validating input points")
     normalized = normalize_tin_parameters(params)
     xyz = _validate_points(points)
     source_point_count = int(xyz.shape[0])
@@ -316,7 +331,10 @@ def build_tin_from_points(
             raise TINInputError(
                 "`boundary_type='custom'` requires `custom_boundary` to be provided."
             )
+        _emit_progress(progress_callback, 0.08, "Loading custom boundary")
         boundary_xy = load_boundary_xy(custom_boundary)
+    else:
+        _emit_progress(progress_callback, 0.08, "Preparing boundary")
 
     working = xyz
     metadata: Dict[str, object] = {
@@ -326,31 +344,45 @@ def build_tin_from_points(
     }
 
     if boundary_xy is not None:
+        _emit_progress(progress_callback, 0.14, "Clipping points to boundary")
         working = _clip_points_to_boundary(working, boundary_xy)
         metadata["custom_boundary_vertices"] = int(boundary_xy.shape[0])
 
+    _emit_progress(progress_callback, 0.24, "Removing duplicates")
     working = _handle_duplicates(working, normalized)
+    _emit_progress(progress_callback, 0.34, "Filtering outliers")
     working = _filter_outliers(working, normalized)
+    _emit_progress(progress_callback, 0.44, "Resampling points")
     working = _resample_points(working, normalized)
+    _emit_progress(progress_callback, 0.54, "Limiting point count")
     working = _limit_points(working, normalized)
     _ensure_minimum_points(working, "TIN preprocessing left fewer than 3 valid points.")
 
+    _emit_progress(progress_callback, 0.64, "Triangulating points")
     triangles = _triangulate_xy(working[:, :2])
+    _emit_progress(progress_callback, 0.74, "Filtering degenerate triangles")
     triangles = _filter_degenerate_triangles(working, triangles, normalized.coincidence_tolerance)
+    _emit_progress(progress_callback, 0.82, "Filtering edge lengths")
     triangles = _filter_by_edge_length(working, triangles, normalized.max_edge_length)
+    _emit_progress(progress_callback, 0.88, "Filtering triangle angles")
     triangles = _filter_by_angles(working, triangles, normalized.min_angle, normalized.max_angle)
 
     if normalized.boundary_type == "concave_hull":
+        _emit_progress(progress_callback, 0.94, "Applying concave hull boundary")
         triangles = _filter_by_alpha_shape(working, triangles, normalized.alpha)
     elif normalized.boundary_type == "custom":
         assert boundary_xy is not None
+        _emit_progress(progress_callback, 0.94, "Applying custom boundary")
         triangles = _filter_by_polygon(working, triangles, boundary_xy)
+    else:
+        _emit_progress(progress_callback, 0.94, "Finalizing boundary")
 
     if triangles.size == 0:
         raise TINGeometryError(
             "TIN construction produced no valid triangles after applying the current filters."
         )
 
+    _emit_progress(progress_callback, 0.98, "Compacting mesh")
     compact_vertices, compact_triangles = _compact_mesh(working, triangles)
     mesh = TINMesh(
         vertices=compact_vertices,
@@ -361,8 +393,10 @@ def build_tin_from_points(
     )
 
     if output_path is not None:
+        _emit_progress(progress_callback, 0.99, "Exporting mesh")
         export_mesh_to_ply(mesh, output_path)
 
+    _emit_progress(progress_callback, 1.0, "Complete")
     return mesh
 
 
@@ -372,6 +406,7 @@ def build_tin_from_file(
     *,
     output_path: str | Path | None = None,
     custom_boundary: str | Path | Sequence[Sequence[float]] | np.ndarray | None = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> TINMesh:
     """
     Load a TXT/PLY cloud, triangulate it, and optionally export the mesh.
@@ -397,6 +432,7 @@ def build_tin_from_file(
         params=params,
         custom_boundary=custom_boundary,
         output_path=output_path,
+        progress_callback=progress_callback,
     )
 
 

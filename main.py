@@ -1060,6 +1060,7 @@ def execute_tin_for_points(
     params: TINCommandParams | Mapping[str, object] | None = None,
     *,
     tin_module=None,
+    progress_callback: Optional[LoadProgressCallback] = None,
 ) -> TINCommandResult:
     """Run the TIN algorithm for an in-memory cloud and return mesh + GUI settings."""
     normalized = normalize_command_params(params)
@@ -1075,6 +1076,7 @@ def execute_tin_for_points(
         points=points,
         params=normalized.algorithm,
         custom_boundary=custom_boundary,
+        progress_callback=progress_callback,
     )
     summary = (
         f"Vertices: {mesh.vertices.shape[0]:,} | "
@@ -2562,16 +2564,16 @@ def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> 
 
 
 FALLBACK_SYNTHETIC_CLASS_NAMES: Dict[int, str] = {
-    0: "Natural surface",
-    1: "Artificial surface",
-    2: "Low vegetation",
-    3: "High vegetation",
+    0: "Artificial surface",
+    1: "Natural surface",
+    2: "High vegetation",
+    3: "Low vegetation",
     4: "Buildings",
     5: "Structures",
-    6: "Vehicles",
-    7: "Artifacts",
+    6: "Artifacts",
+    7: "Vehicles",
 }
-FALLBACK_CLASS_PERCENTAGES: Tuple[float, ...] = (38.0, 13.0, 16.0, 14.0, 10.0, 4.0, 3.0, 2.0)
+FALLBACK_CLASS_PERCENTAGES: Tuple[float, ...] = (13.0, 38.0, 14.0, 16.0, 10.0, 4.0, 2.0, 3.0)
 FALLBACK_ARTIFICIAL_SURFACE_TYPES: Tuple[str, ...] = (
     "road_network",
     "sidewalk",
@@ -6663,6 +6665,7 @@ class MainWindow(QMainWindow):
         if split_module is None:
             return
 
+        self._begin_status_progress("Splitting point cloud")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             result = split_module.split_point_cloud_by_label_arrays(
@@ -6672,8 +6675,10 @@ class MainWindow(QMainWindow):
                 output_dir=output_dir,
                 rgb=self.current_cloud.rgb,
                 source_path=self.current_cloud.file_path,
+                progress_callback=self._update_status_progress,
             )
         except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
             QMessageBox.critical(
                 self,
                 "Split Error",
@@ -6682,6 +6687,8 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
 
         self.statusBar().showMessage(
             f"Saved {len(result.files)} class PLY files to {output_dir}",
@@ -6848,6 +6855,7 @@ class MainWindow(QMainWindow):
         self._last_dbscan_min_pts = params.min_pts
         self._last_dbscan_output_path = params.output_path
 
+        self._begin_status_progress("Running DBSCAN")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             dbscan_module.run_dbscan_on_points(
@@ -6856,9 +6864,12 @@ class MainWindow(QMainWindow):
                 min_pts=params.min_pts,
                 output_path=params.output_path,
                 input_path=self.current_cloud.file_path,
+                progress_callback=self._update_status_progress,
             )
+            self._update_status_progress(1.0, "Loading saved result")
             saved_result = dbscan_module.load_cluster_result(params.output_path)
         except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
             QMessageBox.critical(
                 self,
                 "DBSCAN Error",
@@ -6867,6 +6878,8 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
 
         saved_path = Path(params.output_path)
         if saved_path.suffix.lower() not in {".yaml", ".yml"}:
@@ -6911,14 +6924,17 @@ class MainWindow(QMainWindow):
             visual=project_tin_visual_settings(self._settings),
         )
 
+        self._begin_status_progress("Building TIN mesh")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             result = execute_tin_for_points(
                 self.current_cloud.points,
                 params=params,
                 tin_module=tin_module,
+                progress_callback=self._update_status_progress,
             )
         except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
             QMessageBox.critical(
                 self,
                 "TIN Error",
@@ -6927,6 +6943,8 @@ class MainWindow(QMainWindow):
             return
         finally:
             QApplication.restoreOverrideCursor()
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
 
         self._last_tin_params = result.params
         self._mesh_source_path = ""

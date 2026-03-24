@@ -15,13 +15,30 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import struct
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import yaml
 
 
 CLUSTER_FILE_SCHEMA = "magicpoints.dbscan.clusters.v1"
+
+
+ProgressCallback = Callable[[float, str], None]
+
+
+def _emit_progress(
+    progress_callback: Optional[ProgressCallback],
+    progress: float,
+    stage: str = "",
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(float(min(1.0, max(0.0, progress))), str(stage).strip())
+
+
+def _progress_interval(count: int) -> int:
+    return max(1, int(count) // 200)
 
 
 class DBSCANInputError(ValueError):
@@ -218,6 +235,7 @@ def compute_dbscan_labels(
     points: np.ndarray | Sequence[Sequence[float]],
     epsilon: float,
     min_pts: int,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> np.ndarray:
     """
     Compute DBSCAN cluster labels for a point array with shape (N, 3).
@@ -234,9 +252,12 @@ def compute_dbscan_labels(
     point_count = int(point_array.shape[0])
     labels = np.full(point_count, -2, dtype=np.int32)  # -2 = unvisited
     epsilon_sq = float(epsilon_value * epsilon_value)
+    _emit_progress(progress_callback, 0.0, "Building spatial hash")
     cell_coords, buckets = _build_spatial_hash(point_array, epsilon_value)
     neighbor_cache: List[Optional[np.ndarray]] = [None] * point_count
+    report_interval = _progress_interval(point_count)
 
+    _emit_progress(progress_callback, 0.08, "Clustering points")
     cluster_id = 0
     for point_index in range(point_count):
         if labels[point_index] != -2:
@@ -294,19 +315,37 @@ def compute_dbscan_labels(
 
         cluster_id += 1
 
+        if (point_index + 1) % report_interval == 0 or point_index == point_count - 1:
+            _emit_progress(
+                progress_callback,
+                0.08 + 0.92 * ((point_index + 1) / point_count),
+                f"Clustering points ({point_index + 1:,}/{point_count:,})",
+            )
+
     labels[labels == -2] = -1
+    _emit_progress(progress_callback, 1.0, "Clustering complete")
     return labels
 
 
-def build_cluster_records(points: np.ndarray, labels: np.ndarray) -> Tuple[ClusterRecord, ...]:
+def build_cluster_records(
+    points: np.ndarray,
+    labels: np.ndarray,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Tuple[ClusterRecord, ...]:
     point_array = _validate_points(points)
     label_array = np.asarray(labels, dtype=np.int32).reshape(-1)
     if label_array.shape[0] != point_array.shape[0]:
         raise DBSCANInputError("Labels must contain the same number of rows as points.")
 
     cluster_ids = sorted(int(cluster_id) for cluster_id in np.unique(label_array) if cluster_id >= 0)
+    if not cluster_ids:
+        _emit_progress(progress_callback, 1.0, "No clusters found")
+        return ()
+
     clusters: List[ClusterRecord] = []
-    for cluster_id in cluster_ids:
+    report_interval = _progress_interval(len(cluster_ids))
+    total_clusters = len(cluster_ids)
+    for index, cluster_id in enumerate(cluster_ids, start=1):
         cluster_points = point_array[label_array == cluster_id]
         if cluster_points.shape[0] == 0:
             continue
@@ -322,6 +361,12 @@ def build_cluster_records(points: np.ndarray, labels: np.ndarray) -> Tuple[Clust
                 ),
             )
         )
+        if index % report_interval == 0 or index == total_clusters:
+            _emit_progress(
+                progress_callback,
+                index / total_clusters,
+                f"Building bounding boxes ({index:,}/{total_clusters:,})",
+            )
     return tuple(clusters)
 
 
@@ -331,13 +376,30 @@ def run_dbscan_on_points(
     min_pts: int,
     output_path: Optional[str | Path] = None,
     input_path: str = "",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> DBSCANClusterResult:
     point_array = _validate_points(points)
     epsilon_value = _validate_epsilon(epsilon)
     min_pts_value = _validate_min_pts(min_pts)
 
-    labels = compute_dbscan_labels(point_array, epsilon_value, min_pts_value)
-    clusters = build_cluster_records(point_array, labels)
+    def scaled_progress(start: float, end: float):
+        def emit(progress: float, stage: str = "") -> None:
+            clamped = float(min(1.0, max(0.0, progress)))
+            _emit_progress(progress_callback, start + (end - start) * clamped, stage)
+        return emit
+
+    _emit_progress(progress_callback, 0.0, "Preparing DBSCAN")
+    labels = compute_dbscan_labels(
+        point_array,
+        epsilon_value,
+        min_pts_value,
+        progress_callback=scaled_progress(0.05, 0.80),
+    )
+    clusters = build_cluster_records(
+        point_array,
+        labels,
+        progress_callback=scaled_progress(0.80, 0.95),
+    )
     result = DBSCANClusterResult(
         epsilon=epsilon_value,
         min_pts=min_pts_value,
@@ -346,7 +408,9 @@ def run_dbscan_on_points(
         clusters=clusters,
     )
     if output_path is not None:
+        _emit_progress(progress_callback, 0.97, "Saving clusters YAML")
         save_cluster_result(result, output_path)
+    _emit_progress(progress_callback, 1.0, "Complete")
     return result
 
 
@@ -355,6 +419,7 @@ def run_dbscan_on_file(
     epsilon: float,
     min_pts: int,
     output_path: Optional[str | Path] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> DBSCANClusterResult:
     input_file = Path(input_path)
     points = load_point_cloud_xyz(input_file)
@@ -364,6 +429,7 @@ def run_dbscan_on_file(
         min_pts=min_pts,
         output_path=output_path,
         input_path=str(input_file),
+        progress_callback=progress_callback,
     )
 
 
