@@ -31,6 +31,40 @@ import yaml
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_DIR / "data"
 
+ProgressCallback = Callable[[float, str], None]
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    progress: float,
+    stage: str = "",
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        float(min(1.0, max(0.0, float(progress)))),
+        str(stage).strip(),
+    )
+
+
+def _make_progress_subrange(
+    progress_callback: ProgressCallback | None,
+    start: float,
+    end: float,
+) -> ProgressCallback | None:
+    if progress_callback is None:
+        return None
+
+    start_f = float(start)
+    end_f = max(start_f, float(end))
+
+    def _callback(progress: float, stage: str = "") -> None:
+        clamped = float(min(1.0, max(0.0, float(progress))))
+        mapped = start_f + (end_f - start_f) * clamped
+        _emit_progress(progress_callback, mapped, stage)
+
+    return _callback
+
 
 def ensure_data_dir() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -125,6 +159,168 @@ DEFAULT_VEHICLE_TYPE_RATIOS: Dict[str, float] = {
 DEFAULT_VEHICLE_TYPE_PERCENTAGES: Tuple[float, ...] = tuple(
     DEFAULT_VEHICLE_TYPE_RATIOS[vehicle_type] * 100.0 for vehicle_type in VEHICLE_TYPES
 )
+
+ARTIFACT_DEFAULTS: Dict[str, float | bool] = {
+    "enabled": True,
+    "global_intensity": 0.65,
+    "point_fraction": DEFAULT_CLASS_RATIOS[ARTIFACTS_CLASS_ID],
+}
+ARTIFACT_TYPE_SPECS: Tuple[Dict[str, Any], ...] = (
+    {
+        "key": "random_outliers",
+        "label": "Random outliers",
+        "tooltip": "Sparse isolated returns and compact outlier clusters detached from real geometry.",
+        "default_enabled": True,
+        "default_intensity": 0.72,
+        "default_amount": 0.24,
+        "params": (
+            {
+                "key": "spread",
+                "label": "Spread",
+                "default": 0.85,
+                "min": 0.05,
+                "max": 4.0,
+                "step": 0.05,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Maximum spatial spread of isolated outlier clusters in meters.",
+            },
+        ),
+    },
+    {
+        "key": "surface_noise",
+        "label": "Surface noise",
+        "tooltip": "Noisy halo around terrain, roads and object surfaces caused by unstable range measurements.",
+        "default_enabled": True,
+        "default_intensity": 0.68,
+        "default_amount": 0.22,
+        "params": (
+            {
+                "key": "thickness",
+                "label": "Thickness",
+                "default": 0.16,
+                "min": 0.01,
+                "max": 1.5,
+                "step": 0.01,
+                "decimals": 3,
+                "suffix": " m",
+                "tooltip": "Approximate thickness of the noisy shell around sampled surfaces.",
+            },
+        ),
+    },
+    {
+        "key": "hanging_points",
+        "label": "Hanging points",
+        "tooltip": "Floating points above objects or terrain that do not connect to any real surface.",
+        "default_enabled": True,
+        "default_intensity": 0.58,
+        "default_amount": 0.14,
+        "params": (
+            {
+                "key": "height",
+                "label": "Height range",
+                "default": 2.4,
+                "min": 0.10,
+                "max": 12.0,
+                "step": 0.10,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Maximum elevation offset of floating points above nearby geometry.",
+            },
+        ),
+    },
+    {
+        "key": "ghost_double_points",
+        "label": "Ghost / double points",
+        "tooltip": "Duplicated returns slightly offset from the original surface, similar to multi-path or double echoes.",
+        "default_enabled": True,
+        "default_intensity": 0.62,
+        "default_amount": 0.14,
+        "params": (
+            {
+                "key": "offset",
+                "label": "Offset",
+                "default": 0.18,
+                "min": 0.02,
+                "max": 1.5,
+                "step": 0.01,
+                "decimals": 3,
+                "suffix": " m",
+                "tooltip": "Typical offset between the original return and its ghost copy.",
+            },
+        ),
+    },
+    {
+        "key": "blurred_boundaries",
+        "label": "Blurred boundaries",
+        "tooltip": "Fuzzy transitions near the edges of roads, buildings and other sharp boundaries.",
+        "default_enabled": True,
+        "default_intensity": 0.57,
+        "default_amount": 0.16,
+        "params": (
+            {
+                "key": "width",
+                "label": "Boundary width",
+                "default": 0.45,
+                "min": 0.05,
+                "max": 4.0,
+                "step": 0.05,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Width of the transition strip sampled around geometry boundaries.",
+            },
+        ),
+    },
+    {
+        "key": "false_reflections",
+        "label": "False reflections",
+        "tooltip": "Spurious reflected returns near vertical structures, vehicles or strong reflective surfaces.",
+        "default_enabled": True,
+        "default_intensity": 0.52,
+        "default_amount": 0.10,
+        "params": (
+            {
+                "key": "height",
+                "label": "Reflection height",
+                "default": 1.80,
+                "min": 0.10,
+                "max": 10.0,
+                "step": 0.10,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Maximum vertical displacement of reflected returns above the anchor geometry.",
+            },
+        ),
+    },
+)
+ARTIFACT_TYPES: Tuple[str, ...] = tuple(str(spec["key"]) for spec in ARTIFACT_TYPE_SPECS)
+ARTIFACT_TYPE_NAMES: Dict[str, str] = {
+    str(spec["key"]): str(spec["label"]) for spec in ARTIFACT_TYPE_SPECS
+}
+ARTIFACT_TYPE_TOOLTIPS: Dict[str, str] = {
+    str(spec["key"]): str(spec["tooltip"]) for spec in ARTIFACT_TYPE_SPECS
+}
+ARTIFACT_TYPE_SPEC_BY_KEY: Dict[str, Dict[str, Any]] = {
+    str(spec["key"]): dict(spec) for spec in ARTIFACT_TYPE_SPECS
+}
+
+
+def _default_artifact_type_settings() -> Dict[str, Dict[str, float | bool]]:
+    settings: Dict[str, Dict[str, float | bool]] = {}
+    for spec in ARTIFACT_TYPE_SPECS:
+        artifact_key = str(spec["key"])
+        entry: Dict[str, float | bool] = {
+            "enabled": bool(spec["default_enabled"]),
+            "intensity": float(spec["default_intensity"]),
+            "amount": float(spec["default_amount"]),
+        }
+        for param_spec in spec.get("params", ()):
+            entry[str(param_spec["key"])] = float(param_spec["default"])
+        settings[artifact_key] = entry
+    return settings
+
+
+DEFAULT_ARTIFACT_TYPE_SETTINGS = _default_artifact_type_settings()
 
 LOW_VEG_DEFAULTS: Dict[str, float] = {
     "shrub_max_diameter": 2.6,
@@ -332,6 +528,10 @@ def default_generation_config() -> Dict[str, Any]:
         "vehicle_count": 24,
         "custom_vehicle_type_distribution": False,
         "vehicle_type_percentages": tuple(DEFAULT_VEHICLE_TYPE_PERCENTAGES),
+        "artifacts_enabled": bool(ARTIFACT_DEFAULTS["enabled"]),
+        "artifact_global_intensity": float(ARTIFACT_DEFAULTS["global_intensity"]),
+        "artifact_point_fraction": float(ARTIFACT_DEFAULTS["point_fraction"]),
+        "artifact_type_settings": _default_artifact_type_settings(),
         "custom_shrub_count": False,
         "shrub_count": 24,
         "random_shrub_size": True,
@@ -484,6 +684,123 @@ def _validate_enabled_percentage_distribution(
         raise ValueError(f"`{name}` must sum to 100.0, got {total:.2f}.")
 
 
+def _copy_artifact_type_settings(
+    settings: Mapping[str, Mapping[str, Any]] | None = None,
+) -> Dict[str, Dict[str, float | bool]]:
+    source = settings if isinstance(settings, Mapping) else DEFAULT_ARTIFACT_TYPE_SETTINGS
+    copied: Dict[str, Dict[str, float | bool]] = {}
+    for spec in ARTIFACT_TYPE_SPECS:
+        artifact_key = str(spec["key"])
+        source_entry = source.get(artifact_key, {}) if isinstance(source, Mapping) else {}
+        if not isinstance(source_entry, Mapping):
+            source_entry = {}
+        default_entry = DEFAULT_ARTIFACT_TYPE_SETTINGS[artifact_key]
+        entry: Dict[str, float | bool] = {
+            "enabled": bool(source_entry.get("enabled", default_entry["enabled"])),
+            "intensity": float(source_entry.get("intensity", default_entry["intensity"])),
+            "amount": float(source_entry.get("amount", default_entry["amount"])),
+        }
+        for param_spec in spec.get("params", ()):
+            param_key = str(param_spec["key"])
+            entry[param_key] = float(source_entry.get(param_key, default_entry[param_key]))
+        copied[artifact_key] = entry
+    return copied
+
+
+def _normalize_artifact_type_settings_payload(
+    direct_settings: Any,
+    nested_settings: Any,
+    *,
+    defaults: Mapping[str, Mapping[str, Any]] | None = None,
+) -> Dict[str, Dict[str, float | bool]]:
+    defaults_map = _copy_artifact_type_settings(defaults)
+
+    def _normalize_source_entries(raw_value: Any, field_name: str) -> Dict[str, Dict[str, Any]]:
+        if raw_value is None:
+            return {}
+        if not isinstance(raw_value, Mapping):
+            raise ValueError(f"`{field_name}` must be a mapping.")
+
+        entries: Dict[str, Dict[str, Any]] = {}
+        for raw_key, raw_entry in raw_value.items():
+            artifact_key = _parse_choice_key(raw_key, field_name, ARTIFACT_TYPES)
+            if raw_entry is None:
+                entries[artifact_key] = {}
+                continue
+            if not isinstance(raw_entry, Mapping):
+                raise ValueError(f"`{field_name}[{raw_key!r}]` must be a mapping.")
+            normalized_entry: Dict[str, Any] = {}
+            for entry_key, entry_value in raw_entry.items():
+                normalized_entry[str(entry_key).strip().lower()] = entry_value
+            entries[artifact_key] = normalized_entry
+        return entries
+
+    direct_entries = _normalize_source_entries(direct_settings, "artifact_type_settings")
+    nested_entries = _normalize_source_entries(nested_settings, "artifacts.types")
+
+    normalized: Dict[str, Dict[str, float | bool]] = {}
+    for spec in ARTIFACT_TYPE_SPECS:
+        artifact_key = str(spec["key"])
+        default_entry = defaults_map[artifact_key]
+        direct_entry = direct_entries.get(artifact_key, {})
+        nested_entry = nested_entries.get(artifact_key, {})
+        allowed_fields = {"enabled", "intensity", "amount"} | {
+            str(param_spec["key"]) for param_spec in spec.get("params", ())
+        }
+
+        for field_name, entry in (
+            ("artifact_type_settings", direct_entry),
+            ("artifacts.types", nested_entry),
+        ):
+            unknown_fields = sorted(set(entry) - allowed_fields)
+            if unknown_fields:
+                raise ValueError(
+                    f"`{field_name}[{artifact_key!r}]` contains unknown fields: {unknown_fields}."
+                )
+
+        entry: Dict[str, float | bool] = {
+            "enabled": _coerce_bool(
+                direct_entry.get(
+                    "enabled",
+                    nested_entry.get("enabled", default_entry["enabled"]),
+                ),
+                f"artifact_type_settings[{artifact_key!r}]['enabled']",
+            ),
+            "intensity": _coerce_float(
+                direct_entry.get(
+                    "intensity",
+                    nested_entry.get("intensity", default_entry["intensity"]),
+                ),
+                f"artifact_type_settings[{artifact_key!r}]['intensity']",
+                min_value=0.0,
+                max_value=1.0,
+            ),
+            "amount": _coerce_float(
+                direct_entry.get(
+                    "amount",
+                    nested_entry.get("amount", default_entry["amount"]),
+                ),
+                f"artifact_type_settings[{artifact_key!r}]['amount']",
+                min_value=0.0,
+                max_value=1.0,
+            ),
+        }
+        for param_spec in spec.get("params", ()):
+            param_key = str(param_spec["key"])
+            entry[param_key] = _coerce_float(
+                direct_entry.get(
+                    param_key,
+                    nested_entry.get(param_key, default_entry[param_key]),
+                ),
+                f"artifact_type_settings[{artifact_key!r}]['{param_key}']",
+                min_value=float(param_spec["min"]),
+                max_value=float(param_spec["max"]),
+            )
+        normalized[artifact_key] = entry
+
+    return normalized
+
+
 def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     """
     Validate YAML-loaded generation settings and return normalized values.
@@ -501,10 +818,22 @@ def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         )
 
     defaults = default_generation_config()
-    allowed_keys = set(defaults) | {"schema"}
+    allowed_keys = set(defaults) | {"schema", "artifacts"}
     unknown_keys = sorted(set(config) - allowed_keys)
     if unknown_keys:
         raise ValueError(f"Unknown generation config fields: {unknown_keys}.")
+
+    artifacts_section = config.get("artifacts")
+    if artifacts_section is not None and not isinstance(artifacts_section, Mapping):
+        raise ValueError("`artifacts` must be a mapping.")
+    artifacts_section = artifacts_section or {}
+    allowed_artifact_keys = {"enabled", "global_intensity", "point_fraction", "types"}
+    unknown_artifact_keys = sorted(set(artifacts_section) - allowed_artifact_keys)
+    if unknown_artifact_keys:
+        raise ValueError(f"`artifacts` contains unknown fields: {unknown_artifact_keys}.")
+    artifact_types_section = artifacts_section.get("types")
+    if artifact_types_section is not None and not isinstance(artifact_types_section, Mapping):
+        raise ValueError("`artifacts.types` must be a mapping.")
 
     normalized: Dict[str, Any] = {}
     normalized["total_points"] = _coerce_int(
@@ -722,6 +1051,40 @@ def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         ),
     )
 
+    normalized["artifacts_enabled"] = _coerce_bool(
+        config.get(
+            "artifacts_enabled",
+            artifacts_section.get("enabled", defaults["artifacts_enabled"]),
+        ),
+        "artifacts_enabled",
+    )
+    normalized["artifact_global_intensity"] = _coerce_float(
+        config.get(
+            "artifact_global_intensity",
+            artifacts_section.get(
+                "global_intensity",
+                defaults["artifact_global_intensity"],
+            ),
+        ),
+        "artifact_global_intensity",
+        min_value=0.0,
+        max_value=1.0,
+    )
+    normalized["artifact_point_fraction"] = _coerce_float(
+        config.get(
+            "artifact_point_fraction",
+            artifacts_section.get("point_fraction", defaults["artifact_point_fraction"]),
+        ),
+        "artifact_point_fraction",
+        min_value=0.0,
+        max_value=1.0,
+    )
+    normalized["artifact_type_settings"] = _normalize_artifact_type_settings_payload(
+        config.get("artifact_type_settings"),
+        artifact_types_section,
+        defaults=defaults["artifact_type_settings"],
+    )
+
     normalized["custom_shrub_count"] = _coerce_bool(
         config.get("custom_shrub_count", defaults["custom_shrub_count"]),
         "custom_shrub_count",
@@ -821,6 +1184,22 @@ def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         raise ValueError(
             "`shrub_min_bottom_height` must be strictly less than `shrub_max_top_height`."
         )
+    if normalized["artifacts_enabled"] and normalized["artifact_point_fraction"] > 0.0:
+        enabled_artifact_types = [
+            settings
+            for settings in normalized["artifact_type_settings"].values()
+            if bool(settings["enabled"])
+        ]
+        if not enabled_artifact_types:
+            raise ValueError(
+                "At least one artifact type must be enabled when artifacts are enabled and "
+                "`artifact_point_fraction` is > 0."
+            )
+        if not any(float(settings["amount"]) > 0.0 for settings in enabled_artifact_types):
+            raise ValueError(
+                "At least one enabled artifact type must have `amount` > 0 when artifacts "
+                "are enabled and `artifact_point_fraction` is > 0."
+            )
 
     return normalized
 
@@ -829,6 +1208,7 @@ def generation_config_to_yaml_data(config: Mapping[str, Any]) -> Dict[str, Any]:
     """Convert normalized generation settings into a readable YAML payload."""
     validated = validate_generation_config(config)
     yaml_data: Dict[str, Any] = {"schema": GENERATION_CONFIG_SCHEMA}
+    artifact_settings = _copy_artifact_type_settings(validated["artifact_type_settings"])
     for key, value in validated.items():
         if key == "class_percentages":
             yaml_data[key] = {
@@ -860,8 +1240,30 @@ def generation_config_to_yaml_data(config: Mapping[str, Any]) -> Dict[str, Any]:
                 vehicle_type: float(value[index])
                 for index, vehicle_type in enumerate(VEHICLE_TYPES)
             }
+        elif key in {
+            "artifacts_enabled",
+            "artifact_global_intensity",
+            "artifact_point_fraction",
+            "artifact_type_settings",
+        }:
+            continue
         else:
             yaml_data[key] = value
+
+    yaml_data["artifacts"] = {
+        "enabled": bool(validated["artifacts_enabled"]),
+        "global_intensity": float(validated["artifact_global_intensity"]),
+        "point_fraction": float(validated["artifact_point_fraction"]),
+        "types": {
+            artifact_key: {
+                field_name: (
+                    bool(field_value) if field_name == "enabled" else float(field_value)
+                )
+                for field_name, field_value in artifact_settings[artifact_key].items()
+            }
+            for artifact_key in ARTIFACT_TYPES
+        },
+    }
     return yaml_data
 
 
@@ -957,6 +1359,12 @@ def generation_config_to_pipeline_kwargs(config: Mapping[str, Any]) -> Dict[str,
             if validated["custom_vehicle_type_distribution"]
             else None
         ),
+        "artifacts_enabled": bool(validated["artifacts_enabled"]),
+        "artifact_global_intensity": float(validated["artifact_global_intensity"]),
+        "artifact_point_fraction": float(validated["artifact_point_fraction"]),
+        "artifact_type_settings": _copy_artifact_type_settings(
+            validated["artifact_type_settings"]
+        ),
         "shrub_count": int(validated["shrub_count"]) if validated["custom_shrub_count"] else None,
         "random_shrub_size": bool(validated["random_shrub_size"]),
         "shrub_max_diameter": float(validated["shrub_max_diameter"]),
@@ -972,7 +1380,6 @@ def generation_config_to_pipeline_kwargs(config: Mapping[str, Any]) -> Dict[str,
         "grass_patch_max_size_y": float(validated["grass_patch_max_size_y"]),
         "grass_max_height": float(validated["grass_max_height"]),
     }
-
 
 def _validate_positive(value: float, name: str) -> None:
     """Validate positive numeric inputs."""
@@ -1024,6 +1431,36 @@ def _class_ratios_from_percentages(
 
     ratios = weights / weights.sum()
     return {class_id: float(ratios[idx]) for idx, class_id in enumerate(CLASS_IDS)}
+
+
+def _override_artifact_class_ratio(
+    class_ratios: Mapping[int, float],
+    artifact_point_fraction: float,
+) -> Dict[int, float]:
+    adjusted = {
+        class_id: max(0.0, float(class_ratios.get(class_id, 0.0)))
+        for class_id in CLASS_IDS
+    }
+    target_ratio = float(np.clip(float(artifact_point_fraction), 0.0, 1.0))
+    if np.isclose(target_ratio, 1.0):
+        return {
+            class_id: (1.0 if class_id == ARTIFACTS_CLASS_ID else 0.0)
+            for class_id in CLASS_IDS
+        }
+
+    other_ids = [class_id for class_id in CLASS_IDS if class_id != ARTIFACTS_CLASS_ID]
+    other_total = float(sum(adjusted[class_id] for class_id in other_ids))
+    if other_total <= 0.0:
+        raise ValueError(
+            "At least one non-artifact class must keep a positive share when "
+            "`artifact_point_fraction` is below 1.0."
+        )
+
+    remaining_ratio = max(0.0, 1.0 - target_ratio)
+    for class_id in other_ids:
+        adjusted[class_id] = adjusted[class_id] / other_total * remaining_ratio
+    adjusted[ARTIFACTS_CLASS_ID] = target_ratio
+    return adjusted
 
 
 def _artificial_surface_type_ratios_from_percentages(
@@ -1418,6 +1855,52 @@ def _sample_xy(
     return np.concatenate(xs), np.concatenate(ys)
 
 
+def _sample_xy_outside_rects(
+    rng: np.random.Generator,
+    n: int,
+    area_size: Tuple[float, float],
+    forbidden_rects: Sequence[Rect],
+    margin: float = 0.0,
+    max_tries: int = 512,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Sample XY points while strictly avoiding forbidden rectangles."""
+    if n <= 0:
+        return np.empty(0), np.empty(0)
+    if not forbidden_rects:
+        return _sample_xy(rng, n=n, area_size=area_size, margin=margin)
+
+    w, h = area_size
+    x_min, x_max = -w * 0.5, w * 0.5
+    y_min, y_max = -h * 0.5, h * 0.5
+
+    xs: List[np.ndarray] = []
+    ys: List[np.ndarray] = []
+    remaining = int(n)
+    tries = 0
+
+    while remaining > 0 and tries < max_tries:
+        batch = max(1024, remaining * 4)
+        x_try = rng.uniform(x_min, x_max, size=batch)
+        y_try = rng.uniform(y_min, y_max, size=batch)
+        mask = ~_inside_rectangles(x_try, y_try, forbidden_rects, margin=margin)
+        if np.any(mask):
+            accepted = np.flatnonzero(mask)
+            take = min(remaining, int(accepted.size))
+            idx = accepted[:take]
+            xs.append(x_try[idx])
+            ys.append(y_try[idx])
+            remaining -= take
+        tries += 1
+
+    if remaining > 0:
+        raise ValueError(
+            "Failed to sample natural-surface points outside artificial zones. "
+            "Artificial coverage is likely too high for the requested scene settings."
+        )
+
+    return np.concatenate(xs), np.concatenate(ys)
+
+
 def _sample_inside_rect(
     rng: np.random.Generator, n: int, rect: Rect, margin: float = 0.0
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -1779,7 +2262,7 @@ def _sample_natural_terrain_points(
     terrain_relief: float,
 ) -> np.ndarray:
     """Sample terrain points while keeping natural-surface points out of artificial zones."""
-    x_nat, y_nat = _sample_xy(
+    x_nat, y_nat = _sample_xy_outside_rects(
         rng,
         n=n_points,
         area_size=area_size,
@@ -4229,6 +4712,9 @@ def place_objects(
     tree_max_crown_top_height: float = HIGH_VEG_DEFAULTS["tree_max_crown_top_height"],
     tree_min_crown_bottom_height: float = HIGH_VEG_DEFAULTS["tree_min_crown_bottom_height"],
     num_artifact_clusters: int = 40,
+    artifacts_enabled: bool = bool(ARTIFACT_DEFAULTS["enabled"]),
+    artifact_global_intensity: float = float(ARTIFACT_DEFAULTS["global_intensity"]),
+    artifact_type_settings: Mapping[str, Mapping[str, Any]] | None = None,
     shrub_count: int | None = None,
     random_shrub_size: bool = True,
     shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
@@ -4240,6 +4726,7 @@ def place_objects(
     grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
     grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
     seed: int = 43,
+    progress_callback: ProgressCallback | None = None,
 ) -> Tuple[np.ndarray, List[Dict[str, object]]]:
     """
     Place all non-terrain classes and return:
@@ -4260,6 +4747,8 @@ def place_objects(
 
     if num_artificial_surfaces <= 0:
         raise ValueError("`num_artificial_surfaces` must be > 0.")
+
+    _emit_progress(progress_callback, 0.02, "Generating artificial zones")
 
     if artificial_surface_type_ratios is None:
         artificial_surface_type_ratios_eff = _sample_scene_artificial_surface_type_ratios(rng)
@@ -4309,6 +4798,8 @@ def place_objects(
     base_artificial_rects: List[Rect] = [
         zone["rect"] for zone in artificial_zones  # type: ignore[index]
     ]
+
+    _emit_progress(progress_callback, 0.16, "Generating buildings")
 
     # ------------------------------------------------------------------
     # Class 4: buildings (cuboids sampled on walls + roof)
@@ -4426,6 +4917,8 @@ def place_objects(
 
     artificial_rects: List[Rect] = [zone["rect"] for zone in artificial_zones]  # type: ignore[index]
 
+    _emit_progress(progress_callback, 0.32, "Generating artificial surfaces")
+
     # ------------------------------------------------------------------
     # Class 0: artificial surfaces
     # ------------------------------------------------------------------
@@ -4448,6 +4941,8 @@ def place_objects(
             zones_points.append(np.column_stack((x, y, z, labels)))
         if zones_points:
             cloud_parts.append(np.vstack(zones_points))
+
+    _emit_progress(progress_callback, 0.48, "Generating trees")
 
     # ------------------------------------------------------------------
     # Class 2: high vegetation (trees)
@@ -4531,6 +5026,8 @@ def place_objects(
                 )
             )
 
+    _emit_progress(progress_callback, 0.62, "Generating structures")
+
     # ------------------------------------------------------------------
     # Class 5: structures
     # ------------------------------------------------------------------
@@ -4574,6 +5071,8 @@ def place_objects(
                     area_size=area_size,
                 )
             )
+
+    _emit_progress(progress_callback, 0.74, "Generating vehicles")
 
     # ------------------------------------------------------------------
     # Class 7: vehicles (car / truck / bus on drivable artificial surfaces)
@@ -4645,6 +5144,8 @@ def place_objects(
                     vehicle_type=vehicle_type,
                 )
             )
+
+    _emit_progress(progress_callback, 0.84, "Generating low vegetation")
 
     # ------------------------------------------------------------------
     # Class 3: low vegetation (shrubs + grassy patches)
@@ -4734,28 +5235,466 @@ def place_objects(
             if grass_parts:
                 cloud_parts.append(np.vstack(grass_parts))
 
+    _emit_progress(progress_callback, 0.94, "Generating artifacts")
+
     # ------------------------------------------------------------------
-    # Class 6: artifacts (small random clusters and isolated points)
+    # Class 6: artifacts (measurement defects / acquisition errors)
     # ------------------------------------------------------------------
     n_artifacts = int(points_per_class.get(ARTIFACTS_CLASS_ID, 0))
     if n_artifacts > 0:
-        n_clusters = max(1, min(num_artifact_clusters, n_artifacts))
-        per_cluster = _split_count_evenly(n_artifacts, n_clusters)
-        artifact_parts = []
-        for cluster_size in per_cluster:
-            cx, cy = _sample_single_xy(rng, area_size=area_size)
-            spread = float(rng.uniform(0.05, 0.45))
-            x = cx + rng.normal(0.0, spread, size=int(cluster_size))
-            y = cy + rng.normal(0.0, spread, size=int(cluster_size))
-            z = terrain_fn(x, y) + rng.uniform(0.0, 1.4, size=int(cluster_size))
-            labels = np.full(int(cluster_size), ARTIFACTS_CLASS_ID, dtype=np.int32)
-            artifact_parts.append(np.column_stack((x, y, z, labels)))
-        cloud_parts.append(np.vstack(artifact_parts))
+        base_cloud = np.vstack(cloud_parts) if cloud_parts else np.empty((0, 4), dtype=np.float64)
+        artifact_points = _generate_artifact_points(
+            rng=rng,
+            terrain_fn=terrain_fn,
+            area_size=area_size,
+            n_points=n_artifacts,
+            artificial_zones=artificial_zones,
+            building_rects=building_rects,
+            base_cloud=base_cloud,
+            num_artifact_clusters=int(num_artifact_clusters),
+            artifacts_enabled=bool(artifacts_enabled),
+            artifact_global_intensity=float(artifact_global_intensity),
+            artifact_type_settings=artifact_type_settings,
+        )
+        if artifact_points.size > 0:
+            cloud_parts.append(artifact_points)
 
+    _emit_progress(progress_callback, 1.0, "Object generation complete")
     if not cloud_parts:
         return np.empty((0, 4), dtype=np.float64), artificial_zones
     return np.vstack(cloud_parts), artificial_zones
 
+
+
+def _artifact_empty_cloud() -> np.ndarray:
+    return np.empty((0, 4), dtype=np.float64)
+
+
+def _clip_xy_to_area(
+    x: np.ndarray,
+    y: np.ndarray,
+    area_size: Tuple[float, float],
+) -> Tuple[np.ndarray, np.ndarray]:
+    half_w = 0.5 * float(area_size[0])
+    half_h = 0.5 * float(area_size[1])
+    return np.clip(x, -half_w, half_w), np.clip(y, -half_h, half_h)
+
+
+def _artifact_cloud_from_xyz(
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    area_size: Tuple[float, float],
+) -> np.ndarray:
+    x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
+    z_arr = np.asarray(z, dtype=np.float64).reshape(-1)
+    if x_arr.size == 0 or y_arr.size == 0 or z_arr.size == 0:
+        return _artifact_empty_cloud()
+    count = min(x_arr.size, y_arr.size, z_arr.size)
+    x_arr = x_arr[:count]
+    y_arr = y_arr[:count]
+    z_arr = z_arr[:count]
+    x_arr, y_arr = _clip_xy_to_area(x_arr, y_arr, area_size)
+    labels = np.full(count, ARTIFACTS_CLASS_ID, dtype=np.int32)
+    return np.column_stack((x_arr, y_arr, z_arr, labels))
+
+
+def _artifact_effective_strength(global_intensity: float, local_intensity: float) -> float:
+    return float(np.clip(float(global_intensity) * float(local_intensity), 0.0, 1.0))
+
+
+def _sample_artifact_anchors(
+    rng: np.random.Generator,
+    base_cloud: np.ndarray,
+    n_points: int,
+    preferred_labels: Sequence[int] = (),
+) -> np.ndarray:
+    cloud = np.asarray(base_cloud, dtype=np.float64)
+    if cloud.ndim != 2 or cloud.shape[0] == 0 or cloud.shape[1] < 3 or n_points <= 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    candidates = cloud
+    if preferred_labels and cloud.shape[1] >= 4:
+        labels = np.rint(cloud[:, 3]).astype(np.int32)
+        mask = np.isin(labels, np.asarray(preferred_labels, dtype=np.int32))
+        if np.any(mask):
+            candidates = cloud[mask]
+
+    indices = rng.integers(0, candidates.shape[0], size=int(n_points))
+    return np.asarray(candidates[indices, :3], dtype=np.float64)
+
+
+def _sample_points_near_rect_boundaries(
+    rng: np.random.Generator,
+    n_points: int,
+    rects: Sequence[Rect],
+    width: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if n_points <= 0 or not rects:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+    rect_array = np.asarray(rects, dtype=np.float64)
+    perimeters = 2.0 * (rect_array[:, 2] + rect_array[:, 3])
+    perimeters = np.maximum(perimeters, 1e-6)
+    probabilities = perimeters / perimeters.sum()
+    rect_indices = rng.choice(rect_array.shape[0], size=int(n_points), p=probabilities)
+    chosen_rects = rect_array[rect_indices]
+    cx = chosen_rects[:, 0]
+    cy = chosen_rects[:, 1]
+    sx = chosen_rects[:, 2]
+    sy = chosen_rects[:, 3]
+
+    side = rng.integers(0, 4, size=int(n_points))
+    tangent = rng.uniform(-0.5, 0.5, size=int(n_points))
+    tangent_jitter = rng.normal(0.0, max(0.01, float(width)) * 0.15, size=int(n_points))
+    normal = rng.normal(0.0, max(0.01, float(width)) * 0.55, size=int(n_points))
+
+    x = np.empty(int(n_points), dtype=np.float64)
+    y = np.empty(int(n_points), dtype=np.float64)
+
+    left_mask = side == 0
+    right_mask = side == 1
+    bottom_mask = side == 2
+    top_mask = side == 3
+
+    x[left_mask] = cx[left_mask] - 0.5 * sx[left_mask] + normal[left_mask]
+    y[left_mask] = cy[left_mask] + tangent[left_mask] * sy[left_mask] + tangent_jitter[left_mask]
+
+    x[right_mask] = cx[right_mask] + 0.5 * sx[right_mask] + normal[right_mask]
+    y[right_mask] = cy[right_mask] + tangent[right_mask] * sy[right_mask] + tangent_jitter[right_mask]
+
+    x[bottom_mask] = cx[bottom_mask] + tangent[bottom_mask] * sx[bottom_mask] + tangent_jitter[bottom_mask]
+    y[bottom_mask] = cy[bottom_mask] - 0.5 * sy[bottom_mask] + normal[bottom_mask]
+
+    x[top_mask] = cx[top_mask] + tangent[top_mask] * sx[top_mask] + tangent_jitter[top_mask]
+    y[top_mask] = cy[top_mask] + 0.5 * sy[top_mask] + normal[top_mask]
+    return x, y
+
+
+def _generate_random_outlier_artifacts(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    settings: Mapping[str, float | bool],
+    global_intensity: float,
+    num_artifact_clusters: int,
+    **_: Any,
+) -> np.ndarray:
+    if n_points <= 0:
+        return _artifact_empty_cloud()
+
+    strength = 0.15 + 0.85 * _artifact_effective_strength(
+        global_intensity,
+        float(settings["intensity"]),
+    )
+    spread = float(settings["spread"]) * (0.25 + 1.10 * strength)
+    n_clusters = max(1, min(int(n_points), int(round(num_artifact_clusters * (0.45 + 1.55 * strength)))))
+    cluster_sizes = _split_count_evenly(int(n_points), int(n_clusters))
+
+    parts: List[np.ndarray] = []
+    for cluster_size in cluster_sizes:
+        if int(cluster_size) <= 0:
+            continue
+        cx, cy = _sample_single_xy(rng, area_size=area_size)
+        count = int(cluster_size)
+        x = cx + rng.normal(0.0, max(0.01, spread), size=count)
+        y = cy + rng.normal(0.0, max(0.01, spread), size=count)
+        x, y = _clip_xy_to_area(x, y, area_size)
+        z = terrain_fn(x, y) + rng.uniform(0.20, 0.45 + 2.4 * strength + 0.55 * spread, size=count)
+        z += rng.normal(0.0, 0.03 + 0.16 * strength, size=count)
+        parts.append(_artifact_cloud_from_xyz(x, y, z, area_size))
+
+    return np.vstack(parts) if parts else _artifact_empty_cloud()
+
+
+def _generate_surface_noise_artifacts(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    settings: Mapping[str, float | bool],
+    global_intensity: float,
+    base_cloud: np.ndarray,
+    **_: Any,
+) -> np.ndarray:
+    if n_points <= 0:
+        return _artifact_empty_cloud()
+
+    strength = 0.15 + 0.85 * _artifact_effective_strength(
+        global_intensity,
+        float(settings["intensity"]),
+    )
+    thickness = float(settings["thickness"])
+    xy_sigma = max(0.005, thickness * (0.18 + 0.95 * strength))
+    z_sigma = max(0.008, thickness * (0.35 + 1.35 * strength))
+    anchors = _sample_artifact_anchors(
+        rng,
+        base_cloud,
+        int(n_points),
+        preferred_labels=(ARTIFICIAL_SURFACE_CLASS_ID, NATURAL_SURFACE_CLASS_ID, LOW_VEGETATION_CLASS_ID, 4, 5),
+    )
+    if anchors.size == 0:
+        x, y = _sample_xy(rng, int(n_points), area_size=area_size)
+        z = terrain_fn(x, y) + rng.normal(0.0, z_sigma, size=int(n_points))
+        return _artifact_cloud_from_xyz(x, y, z, area_size)
+
+    x = anchors[:, 0] + rng.normal(0.0, xy_sigma, size=int(n_points))
+    y = anchors[:, 1] + rng.normal(0.0, xy_sigma, size=int(n_points))
+    x, y = _clip_xy_to_area(x, y, area_size)
+    z = anchors[:, 2] + rng.normal(0.0, z_sigma, size=int(n_points))
+    return _artifact_cloud_from_xyz(x, y, z, area_size)
+
+
+def _generate_hanging_point_artifacts(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    settings: Mapping[str, float | bool],
+    global_intensity: float,
+    base_cloud: np.ndarray,
+    **_: Any,
+) -> np.ndarray:
+    if n_points <= 0:
+        return _artifact_empty_cloud()
+
+    strength = 0.15 + 0.85 * _artifact_effective_strength(
+        global_intensity,
+        float(settings["intensity"]),
+    )
+    max_height = max(0.10, float(settings["height"]) * (0.35 + 1.35 * strength))
+    xy_sigma = 0.04 + 0.18 * strength
+    anchors = _sample_artifact_anchors(
+        rng,
+        base_cloud,
+        int(n_points),
+        preferred_labels=(HIGH_VEGETATION_CLASS_ID, 4, 5, VEHICLES_CLASS_ID),
+    )
+    if anchors.size == 0:
+        x, y = _sample_xy(rng, int(n_points), area_size=area_size)
+        base_z = terrain_fn(x, y)
+    else:
+        x = anchors[:, 0] + rng.normal(0.0, xy_sigma, size=int(n_points))
+        y = anchors[:, 1] + rng.normal(0.0, xy_sigma, size=int(n_points))
+        x, y = _clip_xy_to_area(x, y, area_size)
+        base_z = np.maximum(terrain_fn(x, y), anchors[:, 2])
+    z = base_z + rng.uniform(0.25, max_height, size=int(n_points))
+    return _artifact_cloud_from_xyz(x, y, z, area_size)
+
+
+def _generate_ghost_double_point_artifacts(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    settings: Mapping[str, float | bool],
+    global_intensity: float,
+    base_cloud: np.ndarray,
+    **kwargs: Any,
+) -> np.ndarray:
+    if n_points <= 0:
+        return _artifact_empty_cloud()
+
+    anchors = _sample_artifact_anchors(rng, base_cloud, int(n_points))
+    if anchors.size == 0:
+        return _generate_random_outlier_artifacts(
+            rng=rng,
+            terrain_fn=terrain_fn,
+            area_size=area_size,
+            n_points=int(n_points),
+            settings=settings,
+            global_intensity=global_intensity,
+            num_artifact_clusters=int(kwargs.get("num_artifact_clusters", 1)),
+        )
+
+    strength = 0.15 + 0.85 * _artifact_effective_strength(
+        global_intensity,
+        float(settings["intensity"]),
+    )
+    offset = max(0.01, float(settings["offset"]) * (0.35 + 1.35 * strength))
+    angle = rng.uniform(0.0, 2.0 * np.pi, size=int(n_points))
+    x = anchors[:, 0] + np.cos(angle) * offset + rng.normal(0.0, 0.20 * offset, size=int(n_points))
+    y = anchors[:, 1] + np.sin(angle) * offset + rng.normal(0.0, 0.20 * offset, size=int(n_points))
+    x, y = _clip_xy_to_area(x, y, area_size)
+    z = anchors[:, 2] + rng.normal(0.0, max(0.01, offset * (0.25 + 0.85 * strength)), size=int(n_points))
+    return _artifact_cloud_from_xyz(x, y, z, area_size)
+
+
+def _generate_blurred_boundary_artifacts(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    settings: Mapping[str, float | bool],
+    global_intensity: float,
+    artificial_zones: Sequence[Dict[str, object]],
+    building_rects: Sequence[Rect],
+    base_cloud: np.ndarray,
+    **_: Any,
+) -> np.ndarray:
+    if n_points <= 0:
+        return _artifact_empty_cloud()
+
+    rects: List[Rect] = [zone["rect"] for zone in artificial_zones] + list(building_rects)
+    if not rects:
+        return _generate_surface_noise_artifacts(
+            rng=rng,
+            terrain_fn=terrain_fn,
+            area_size=area_size,
+            n_points=int(n_points),
+            settings={**settings, "thickness": float(settings["width"])},
+            global_intensity=global_intensity,
+            base_cloud=base_cloud,
+        )
+
+    strength = 0.15 + 0.85 * _artifact_effective_strength(
+        global_intensity,
+        float(settings["intensity"]),
+    )
+    boundary_width = max(0.02, float(settings["width"]) * (0.30 + 1.20 * strength))
+    x, y = _sample_points_near_rect_boundaries(rng, int(n_points), rects, boundary_width)
+    x, y = _clip_xy_to_area(x, y, area_size)
+    z = terrain_fn(x, y) + rng.normal(0.03, max(0.01, boundary_width * (0.12 + 0.50 * strength)), size=int(n_points))
+    return _artifact_cloud_from_xyz(x, y, z, area_size)
+
+
+def _generate_false_reflection_artifacts(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    settings: Mapping[str, float | bool],
+    global_intensity: float,
+    base_cloud: np.ndarray,
+    **kwargs: Any,
+) -> np.ndarray:
+    if n_points <= 0:
+        return _artifact_empty_cloud()
+
+    anchors = _sample_artifact_anchors(
+        rng,
+        base_cloud,
+        int(n_points),
+        preferred_labels=(ARTIFICIAL_SURFACE_CLASS_ID, 4, 5, VEHICLES_CLASS_ID),
+    )
+    if anchors.size == 0:
+        return _generate_hanging_point_artifacts(
+            rng=rng,
+            terrain_fn=terrain_fn,
+            area_size=area_size,
+            n_points=int(n_points),
+            settings=settings,
+            global_intensity=global_intensity,
+            base_cloud=base_cloud,
+        )
+
+    strength = 0.15 + 0.85 * _artifact_effective_strength(
+        global_intensity,
+        float(settings["intensity"]),
+    )
+    max_height = max(0.10, float(settings["height"]) * (0.25 + 1.50 * strength))
+    lateral = 0.05 + 0.22 * strength * max(0.5, max_height)
+    angle = rng.uniform(0.0, 2.0 * np.pi, size=int(n_points))
+    x = anchors[:, 0] + np.cos(angle) * lateral + rng.normal(0.0, 0.25 * lateral, size=int(n_points))
+    y = anchors[:, 1] + np.sin(angle) * lateral + rng.normal(0.0, 0.25 * lateral, size=int(n_points))
+    x, y = _clip_xy_to_area(x, y, area_size)
+    base_z = np.maximum(terrain_fn(x, y), anchors[:, 2])
+    z = base_z + rng.uniform(0.12, max_height, size=int(n_points))
+    return _artifact_cloud_from_xyz(x, y, z, area_size)
+
+
+_ARTIFACT_GENERATORS: Dict[str, Callable[..., np.ndarray]] = {
+    "random_outliers": _generate_random_outlier_artifacts,
+    "surface_noise": _generate_surface_noise_artifacts,
+    "hanging_points": _generate_hanging_point_artifacts,
+    "ghost_double_points": _generate_ghost_double_point_artifacts,
+    "blurred_boundaries": _generate_blurred_boundary_artifacts,
+    "false_reflections": _generate_false_reflection_artifacts,
+}
+
+
+def _generate_artifact_points(
+    rng: np.random.Generator,
+    terrain_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    area_size: Tuple[float, float],
+    n_points: int,
+    artificial_zones: Sequence[Dict[str, object]],
+    building_rects: Sequence[Rect],
+    base_cloud: np.ndarray,
+    num_artifact_clusters: int,
+    artifacts_enabled: bool,
+    artifact_global_intensity: float,
+    artifact_type_settings: Mapping[str, Mapping[str, Any]] | None,
+) -> np.ndarray:
+    if not artifacts_enabled or n_points <= 0:
+        return _artifact_empty_cloud()
+
+    settings = _normalize_artifact_type_settings_payload(
+        artifact_type_settings,
+        None,
+        defaults=DEFAULT_ARTIFACT_TYPE_SETTINGS,
+    )
+    enabled_types = [
+        artifact_key
+        for artifact_key in ARTIFACT_TYPES
+        if bool(settings[artifact_key]["enabled"]) and float(settings[artifact_key]["amount"]) > 0.0
+    ]
+    if not enabled_types:
+        return _artifact_empty_cloud()
+
+    counts = _split_count_by_weights(
+        int(n_points),
+        [float(settings[artifact_key]["amount"]) for artifact_key in enabled_types],
+    )
+    parts: List[np.ndarray] = []
+    for artifact_key, count in zip(enabled_types, counts):
+        if int(count) <= 0:
+            continue
+        part = _ARTIFACT_GENERATORS[artifact_key](
+            rng=rng,
+            terrain_fn=terrain_fn,
+            area_size=area_size,
+            n_points=int(count),
+            settings=settings[artifact_key],
+            global_intensity=float(artifact_global_intensity),
+            artificial_zones=artificial_zones,
+            building_rects=building_rects,
+            base_cloud=base_cloud,
+            num_artifact_clusters=int(num_artifact_clusters),
+        )
+        if part.size > 0:
+            parts.append(part)
+
+    if not parts:
+        return _artifact_empty_cloud()
+
+    artifact_cloud = np.vstack(parts)
+    if artifact_cloud.shape[0] < int(n_points):
+        missing = int(n_points) - int(artifact_cloud.shape[0])
+        fallback_part = _generate_random_outlier_artifacts(
+            rng=rng,
+            terrain_fn=terrain_fn,
+            area_size=area_size,
+            n_points=missing,
+            settings=settings.get("random_outliers", DEFAULT_ARTIFACT_TYPE_SETTINGS["random_outliers"]),
+            global_intensity=float(artifact_global_intensity),
+            num_artifact_clusters=int(num_artifact_clusters),
+        )
+        if fallback_part.size > 0:
+            artifact_cloud = np.vstack((artifact_cloud, fallback_part))
+    if artifact_cloud.shape[0] > int(n_points):
+        rng.shuffle(artifact_cloud, axis=0)
+        artifact_cloud = artifact_cloud[: int(n_points)]
+    elif artifact_cloud.shape[0] < int(n_points):
+        missing = int(n_points) - int(artifact_cloud.shape[0])
+        x, y = _sample_xy(rng, missing, area_size=area_size)
+        z = terrain_fn(x, y) + rng.uniform(0.12, 0.85, size=missing)
+        artifact_cloud = np.vstack((artifact_cloud, _artifact_cloud_from_xyz(x, y, z, area_size)))
+
+    rng.shuffle(artifact_cloud, axis=0)
+    return artifact_cloud[: int(n_points)]
 
 def visualize_point_cloud(points: np.ndarray, labels: np.ndarray) -> None:
     """
@@ -5089,6 +6028,10 @@ def _run_pipeline(
     structure_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    artifacts_enabled: bool = bool(ARTIFACT_DEFAULTS["enabled"]),
+    artifact_global_intensity: float = float(ARTIFACT_DEFAULTS["global_intensity"]),
+    artifact_point_fraction: float | None = None,
+    artifact_type_settings: Mapping[str, Mapping[str, Any]] | None = None,
     shrub_count: int | None = None,
     random_shrub_size: bool = True,
     shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
@@ -5099,15 +6042,21 @@ def _run_pipeline(
     grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
     grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
     grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
+    progress_callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """
     Internal execution pipeline with configurable runtime switches.
     """
+    _emit_progress(progress_callback, 0.02, "Validating parameters")
+
     if total_points <= 0:
         raise ValueError("`total_points` must be > 0.")
     _validate_positive(area_width, "area_width")
     _validate_positive(area_length, "area_length")
     _validate_unit_interval(terrain_relief, "terrain_relief")
+    _validate_unit_interval(artifact_global_intensity, "artifact_global_intensity")
+    if artifact_point_fraction is not None:
+        _validate_unit_interval(artifact_point_fraction, "artifact_point_fraction")
     _validate_positive(tree_max_crown_diameter, "tree_max_crown_diameter")
     _validate_positive(tree_max_crown_top_height, "tree_max_crown_top_height")
     if tree_min_crown_bottom_height < 0.0:
@@ -5146,10 +6095,43 @@ def _run_pipeline(
         raise ValueError("`building_floor_min` must be >= 1.")
     if floor_max < floor_min:
         raise ValueError("`building_floor_max` must be >= `building_floor_min`.")
+    normalized_artifact_type_settings = _normalize_artifact_type_settings_payload(
+        artifact_type_settings,
+        None,
+        defaults=DEFAULT_ARTIFACT_TYPE_SETTINGS,
+    )
+    effective_artifact_fraction = (
+        0.0 if not bool(artifacts_enabled) else float(artifact_point_fraction or 0.0)
+    )
+    if bool(artifacts_enabled) and effective_artifact_fraction > 0.0:
+        enabled_artifact_types = [
+            settings
+            for settings in normalized_artifact_type_settings.values()
+            if bool(settings["enabled"])
+        ]
+        if not enabled_artifact_types:
+            raise ValueError(
+                "At least one artifact type must be enabled when artifacts are enabled and "
+                "`artifact_point_fraction` is > 0."
+            )
+        if not any(float(settings["amount"]) > 0.0 for settings in enabled_artifact_types):
+            raise ValueError(
+                "At least one enabled artifact type must have `amount` > 0 when artifacts "
+                "are enabled and `artifact_point_fraction` is > 0."
+            )
+
+    _emit_progress(progress_callback, 0.10, "Preparing scene configuration")
 
     # ----------------------------- Scene config -----------------------------
     area_size = (float(area_width), float(area_length))
     class_ratios = _class_ratios_from_percentages(class_percentages)
+    if not bool(artifacts_enabled):
+        class_ratios = _override_artifact_class_ratio(class_ratios, 0.0)
+    elif artifact_point_fraction is not None:
+        class_ratios = _override_artifact_class_ratio(
+            class_ratios,
+            float(artifact_point_fraction),
+        )
     artificial_surface_type_distribution_overridden = (
         artificial_surface_type_percentages is not None
     )
@@ -5263,9 +6245,13 @@ def _run_pipeline(
         grass_max_height=float(grass_max_height),
     )
 
+    _emit_progress(progress_callback, 0.18, "Allocating points by class")
     points_per_class = allocate_points(total_points=total_points, class_ratios=class_ratios)
+
+    _emit_progress(progress_callback, 0.24, "Building terrain model")
     terrain_fn = _build_terrain_height_function(area_size, terrain_relief)
 
+    _emit_progress(progress_callback, 0.30, "Generating scene objects")
     object_points, artificial_zones = place_objects(
         terrain_fn=terrain_fn,
         area_size=area_size,
@@ -5288,6 +6274,9 @@ def _run_pipeline(
         tree_max_crown_top_height=float(tree_max_crown_top_height),
         tree_min_crown_bottom_height=float(tree_min_crown_bottom_height),
         num_artifact_clusters=num_artifact_clusters,
+        artifacts_enabled=bool(artifacts_enabled),
+        artifact_global_intensity=float(artifact_global_intensity),
+        artifact_type_settings=normalized_artifact_type_settings,
         shrub_count=(int(shrub_count) if shrub_count is not None else None),
         random_shrub_size=bool(random_shrub_size),
         shrub_max_diameter=float(shrub_max_diameter),
@@ -5299,12 +6288,15 @@ def _run_pipeline(
         grass_patch_max_size_y=float(grass_patch_max_size_y),
         grass_max_height=float(grass_max_height),
         seed=seed + 1,
+        progress_callback=_make_progress_subrange(progress_callback, 0.30, 0.72),
     )
+
+    _emit_progress(progress_callback, 0.78, "Sampling natural terrain")
     terrain_points = _sample_natural_terrain_points(
         rng=np.random.default_rng(seed),
         terrain_fn=terrain_fn,
         area_size=area_size,
-        n_points=points_per_class[0],
+        n_points=int(points_per_class.get(NATURAL_SURFACE_CLASS_ID, 0)),
         forbidden_rects=[zone["rect"] for zone in artificial_zones],  # type: ignore[index]
         terrain_relief=terrain_relief,
     )
@@ -5323,6 +6315,7 @@ def _run_pipeline(
     )
     print(f"Artificial zones: {artificial_zone_summary}")
 
+    _emit_progress(progress_callback, 0.88, "Assembling point cloud")
     point_cloud = np.vstack([terrain_points, object_points])
 
     # Shuffle rows so classes are not grouped by generation stage.
@@ -5334,26 +6327,37 @@ def _run_pipeline(
         point_cloud = point_cloud[:total_points]
     elif point_cloud.shape[0] < total_points:
         missing = total_points - point_cloud.shape[0]
-        x_pad, y_pad = _sample_xy(rng, missing, area_size=area_size)
+        x_pad, y_pad = _sample_xy_outside_rects(
+            rng,
+            missing,
+            area_size=area_size,
+            forbidden_rects=[zone["rect"] for zone in artificial_zones],  # type: ignore[index]
+            margin=0.0,
+        )
         z_pad = terrain_fn(x_pad, y_pad)
         l_pad = np.full(missing, NATURAL_SURFACE_CLASS_ID, dtype=np.int32)
         point_cloud = np.vstack([point_cloud, np.column_stack((x_pad, y_pad, z_pad, l_pad))])
 
+    _emit_progress(progress_callback, 0.94, "Computing label statistics")
     labels = point_cloud[:, 3].astype(np.int32)
     _print_stats(labels)
 
     if save_csv:
+        _emit_progress(progress_callback, 0.97, "Saving CSV")
         csv_path = ensure_data_dir() / "synthetic_landscape_point_cloud.csv"
         export_to_csv(point_cloud, csv_path)
         print(f"Saved CSV: {csv_path}")
     if save_ply:
+        _emit_progress(progress_callback, 0.99, "Saving PLY")
         ply_path = ensure_data_dir() / "synthetic_landscape_point_cloud.ply"
         export_to_ply(point_cloud, ply_path)
         print(f"Saved PLY: {ply_path}")
 
     if show_visualization:
+        _emit_progress(progress_callback, 0.995, "Opening visualization")
         visualize_point_cloud(point_cloud[:, :3], labels)
 
+    _emit_progress(progress_callback, 1.0, "Generation complete")
     return point_cloud
 
 
@@ -5382,6 +6386,10 @@ def generate_point_cloud(
     structure_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    artifacts_enabled: bool = bool(ARTIFACT_DEFAULTS["enabled"]),
+    artifact_global_intensity: float = float(ARTIFACT_DEFAULTS["global_intensity"]),
+    artifact_point_fraction: float | None = None,
+    artifact_type_settings: Mapping[str, Mapping[str, Any]] | None = None,
     shrub_count: int | None = None,
     random_shrub_size: bool = True,
     shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
@@ -5392,6 +6400,7 @@ def generate_point_cloud(
     grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
     grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
     grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
+    progress_callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """
     Public API for programmatic generation without side effects:
@@ -5410,7 +6419,9 @@ def generate_point_cloud(
       - optional custom structure type percentages
       - optional custom number of vehicle instances
       - optional custom vehicle type percentages [car, truck, bus]
+      - optional artifact controls (enable flag, global intensity, per-type settings)
       - optional custom low vegetation controls (shrubs + grass patches)
+      - optional progress callback receiving `(progress, stage)` updates
     Returns point cloud array with shape (N, 4): x, y, z, label.
     """
     return _run_pipeline(
@@ -5441,6 +6452,10 @@ def generate_point_cloud(
         structure_type_percentages=structure_type_percentages,
         vehicle_count=vehicle_count,
         vehicle_type_percentages=vehicle_type_percentages,
+        artifacts_enabled=bool(artifacts_enabled),
+        artifact_global_intensity=float(artifact_global_intensity),
+        artifact_point_fraction=artifact_point_fraction,
+        artifact_type_settings=artifact_type_settings,
         shrub_count=shrub_count,
         random_shrub_size=bool(random_shrub_size),
         shrub_max_diameter=float(shrub_max_diameter),
@@ -5451,6 +6466,7 @@ def generate_point_cloud(
         grass_patch_max_size_x=float(grass_patch_max_size_x),
         grass_patch_max_size_y=float(grass_patch_max_size_y),
         grass_max_height=float(grass_max_height),
+        progress_callback=progress_callback,
     )
 
 
@@ -5479,6 +6495,10 @@ def main(
     structure_type_percentages: Sequence[float] | Dict[str, float] | None = None,
     vehicle_count: int | None = None,
     vehicle_type_percentages: Sequence[float] | Dict[str, float] | None = None,
+    artifacts_enabled: bool = bool(ARTIFACT_DEFAULTS["enabled"]),
+    artifact_global_intensity: float = float(ARTIFACT_DEFAULTS["global_intensity"]),
+    artifact_point_fraction: float | None = None,
+    artifact_type_settings: Mapping[str, Mapping[str, Any]] | None = None,
     shrub_count: int | None = None,
     random_shrub_size: bool = True,
     shrub_max_diameter: float = LOW_VEG_DEFAULTS["shrub_max_diameter"],
@@ -5489,6 +6509,7 @@ def main(
     grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
     grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
     grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
+    progress_callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """
     Entry point required by task.
@@ -5503,7 +6524,9 @@ def main(
       - uses default building generation unless custom values are provided
       - uses random structure generation unless custom values are provided
       - uses default vehicle count and type distribution unless custom values are provided
+      - supports configurable artifact generation controls
       - uses default low-vegetation generation unless custom values are provided
+      - optional progress callback receiving `(progress, stage)` updates
       - prints stats
       - saves CSV + PLY
       - opens interactive visualization
@@ -5536,6 +6559,10 @@ def main(
         structure_type_percentages=structure_type_percentages,
         vehicle_count=vehicle_count,
         vehicle_type_percentages=vehicle_type_percentages,
+        artifacts_enabled=bool(artifacts_enabled),
+        artifact_global_intensity=float(artifact_global_intensity),
+        artifact_point_fraction=artifact_point_fraction,
+        artifact_type_settings=artifact_type_settings,
         shrub_count=shrub_count,
         random_shrub_size=bool(random_shrub_size),
         shrub_max_diameter=float(shrub_max_diameter),
@@ -5546,6 +6573,7 @@ def main(
         grass_patch_max_size_x=float(grass_patch_max_size_x),
         grass_patch_max_size_y=float(grass_patch_max_size_y),
         grass_max_height=float(grass_max_height),
+        progress_callback=progress_callback,
     )
 
 
@@ -5734,6 +6762,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--artifacts-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=bool(ARTIFACT_DEFAULTS["enabled"]),
+        help="Enable generation of artifact points (class 6).",
+    )
+    parser.add_argument(
+        "--artifact-global-intensity",
+        type=float,
+        default=float(ARTIFACT_DEFAULTS["global_intensity"]),
+        help="Global intensity multiplier for artifact generators in [0,1].",
+    )
+    parser.add_argument(
+        "--artifact-point-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Optional target fraction of total points assigned to artifacts in [0,1]. "
+            "When omitted, the artifact share follows `class_percentages`."
+        ),
+    )
+    parser.add_argument(
         "--shrub-count",
         type=int,
         help="Optional custom number of shrub clusters for class 3 (low vegetation).",
@@ -5906,6 +6955,12 @@ def cli(argv: Sequence[str] | None = None) -> int:
         pipeline_kwargs["vehicle_count"] = args.vehicle_count
     if "vehicle_type_percentages" in explicit_dests:
         pipeline_kwargs["vehicle_type_percentages"] = args.vehicle_type_percentages
+    if "artifacts_enabled" in explicit_dests:
+        pipeline_kwargs["artifacts_enabled"] = bool(args.artifacts_enabled)
+    if "artifact_global_intensity" in explicit_dests:
+        pipeline_kwargs["artifact_global_intensity"] = float(args.artifact_global_intensity)
+    if "artifact_point_fraction" in explicit_dests:
+        pipeline_kwargs["artifact_point_fraction"] = float(args.artifact_point_fraction)
     if "shrub_count" in explicit_dests:
         pipeline_kwargs["shrub_count"] = args.shrub_count
     if "random_shrub_size" in explicit_dests:

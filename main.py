@@ -2745,6 +2745,157 @@ FALLBACK_HIGH_VEG_DEFAULTS: Dict[str, float] = {
     "tree_max_crown_top_height": 9.5,
     "tree_min_crown_bottom_height": 1.3,
 }
+FALLBACK_ARTIFACTS_ENABLED: bool = True
+FALLBACK_ARTIFACT_GLOBAL_INTENSITY: float = 0.65
+FALLBACK_ARTIFACT_POINT_FRACTION: float = 0.02
+FALLBACK_ARTIFACT_TYPE_SPECS: Tuple[Dict[str, object], ...] = (
+    {
+        "key": "random_outliers",
+        "label": "Random outliers",
+        "tooltip": "Sparse isolated returns and compact outlier clusters detached from real geometry.",
+        "default_enabled": True,
+        "default_intensity": 0.72,
+        "default_amount": 0.24,
+        "params": (
+            {
+                "key": "spread",
+                "label": "Spread",
+                "default": 0.85,
+                "min": 0.05,
+                "max": 4.0,
+                "step": 0.05,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Maximum spatial spread of isolated outlier clusters in meters.",
+            },
+        ),
+    },
+    {
+        "key": "surface_noise",
+        "label": "Surface noise",
+        "tooltip": "Noisy halo around terrain, roads and object surfaces caused by unstable range measurements.",
+        "default_enabled": True,
+        "default_intensity": 0.68,
+        "default_amount": 0.22,
+        "params": (
+            {
+                "key": "thickness",
+                "label": "Thickness",
+                "default": 0.16,
+                "min": 0.01,
+                "max": 1.5,
+                "step": 0.01,
+                "decimals": 3,
+                "suffix": " m",
+                "tooltip": "Approximate thickness of the noisy shell around sampled surfaces.",
+            },
+        ),
+    },
+    {
+        "key": "hanging_points",
+        "label": "Hanging points",
+        "tooltip": "Floating points above objects or terrain that do not connect to any real surface.",
+        "default_enabled": True,
+        "default_intensity": 0.58,
+        "default_amount": 0.14,
+        "params": (
+            {
+                "key": "height",
+                "label": "Height range",
+                "default": 2.4,
+                "min": 0.10,
+                "max": 12.0,
+                "step": 0.10,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Maximum elevation offset of floating points above nearby geometry.",
+            },
+        ),
+    },
+    {
+        "key": "ghost_double_points",
+        "label": "Ghost / double points",
+        "tooltip": "Duplicated returns slightly offset from the original surface, similar to multi-path or double echoes.",
+        "default_enabled": True,
+        "default_intensity": 0.62,
+        "default_amount": 0.14,
+        "params": (
+            {
+                "key": "offset",
+                "label": "Offset",
+                "default": 0.18,
+                "min": 0.02,
+                "max": 1.5,
+                "step": 0.01,
+                "decimals": 3,
+                "suffix": " m",
+                "tooltip": "Typical offset between the original return and its ghost copy.",
+            },
+        ),
+    },
+    {
+        "key": "blurred_boundaries",
+        "label": "Blurred boundaries",
+        "tooltip": "Fuzzy transitions near the edges of roads, buildings and other sharp boundaries.",
+        "default_enabled": True,
+        "default_intensity": 0.57,
+        "default_amount": 0.16,
+        "params": (
+            {
+                "key": "width",
+                "label": "Boundary width",
+                "default": 0.45,
+                "min": 0.05,
+                "max": 4.0,
+                "step": 0.05,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Width of the transition strip sampled around geometry boundaries.",
+            },
+        ),
+    },
+    {
+        "key": "false_reflections",
+        "label": "False reflections",
+        "tooltip": "Spurious reflected returns near vertical structures, vehicles or strong reflective surfaces.",
+        "default_enabled": True,
+        "default_intensity": 0.52,
+        "default_amount": 0.10,
+        "params": (
+            {
+                "key": "height",
+                "label": "Reflection height",
+                "default": 1.80,
+                "min": 0.10,
+                "max": 10.0,
+                "step": 0.10,
+                "decimals": 2,
+                "suffix": " m",
+                "tooltip": "Maximum vertical displacement of reflected returns above the anchor geometry.",
+            },
+        ),
+    },
+)
+
+
+def _build_fallback_artifact_type_settings() -> Dict[str, Dict[str, object]]:
+    settings: Dict[str, Dict[str, object]] = {}
+    for spec in FALLBACK_ARTIFACT_TYPE_SPECS:
+        artifact_key = str(spec["key"])
+        entry: Dict[str, object] = {
+            "enabled": bool(spec["default_enabled"]),
+            "intensity": float(spec["default_intensity"]),
+            "amount": float(spec["default_amount"]),
+        }
+        for param_spec in spec.get("params", ()):  # type: ignore[union-attr]
+            entry[str(param_spec["key"])] = float(param_spec["default"])
+        settings[artifact_key] = entry
+    return settings
+
+
+FALLBACK_DEFAULT_ARTIFACT_TYPE_SETTINGS: Dict[str, Dict[str, object]] = (
+    _build_fallback_artifact_type_settings()
+)
 
 
 @dataclass
@@ -2788,6 +2939,10 @@ class SyntheticGenerationParams:
     vehicle_count: int = 24
     custom_vehicle_type_distribution: bool = False
     vehicle_type_percentages: Tuple[float, ...] = FALLBACK_VEHICLE_TYPE_PERCENTAGES
+    artifacts_enabled: bool = FALLBACK_ARTIFACTS_ENABLED
+    artifact_global_intensity: float = FALLBACK_ARTIFACT_GLOBAL_INTENSITY
+    artifact_point_fraction: float = FALLBACK_ARTIFACT_POINT_FRACTION
+    artifact_type_settings: Dict[str, Dict[str, object]] = field(default_factory=dict)
     custom_shrub_count: bool = False
     shrub_count: int = 24
     random_shrub_size: bool = True
@@ -2821,6 +2976,9 @@ class SyntheticGenerationDialog(QDialog):
         vehicle_type_names: Optional[Dict[str, str]] = None,
         default_vehicle_type_percentages: Optional[Sequence[float]] = None,
         low_veg_defaults: Optional[Dict[str, float]] = None,
+        artifact_defaults: Optional[Mapping[str, object]] = None,
+        artifact_type_specs: Optional[Sequence[Mapping[str, object]]] = None,
+        default_artifact_type_settings: Optional[Mapping[str, Mapping[str, object]]] = None,
         synthetic_module=None,
         parent=None,
     ):
@@ -2901,6 +3059,14 @@ class SyntheticGenerationDialog(QDialog):
         self._vehicle_type_names = self._normalize_vehicle_type_names(vehicle_type_names)
         self._vehicle_types = list(FALLBACK_VEHICLE_TYPES)
         self._low_veg_defaults = self._normalize_low_veg_defaults(low_veg_defaults)
+        self._artifact_defaults = self._normalize_artifact_defaults(artifact_defaults)
+        self._artifact_type_specs = self._normalize_artifact_type_specs(artifact_type_specs)
+        self._artifact_types = [str(spec["key"]) for spec in self._artifact_type_specs]
+        self._default_artifact_type_settings = self._normalize_artifact_type_settings(
+            default_artifact_type_settings,
+            self._artifact_type_specs,
+            defaults=FALLBACK_DEFAULT_ARTIFACT_TYPE_SETTINGS,
+        )
         fallback_vehicle_percentages = self._normalize_percentages(
             values=default_vehicle_type_percentages,
             class_count=len(self._vehicle_types),
@@ -2924,6 +3090,12 @@ class SyntheticGenerationDialog(QDialog):
             tree_max_crown_top_height=float(self._high_veg_defaults["tree_max_crown_top_height"]),
             tree_min_crown_bottom_height=float(self._high_veg_defaults["tree_min_crown_bottom_height"]),
             vehicle_type_percentages=tuple(fallback_vehicle_percentages),
+            artifacts_enabled=bool(self._artifact_defaults["enabled"]),
+            artifact_global_intensity=float(self._artifact_defaults["global_intensity"]),
+            artifact_point_fraction=float(self._artifact_defaults["point_fraction"]),
+            artifact_type_settings=self._copy_artifact_type_settings(
+                self._default_artifact_type_settings
+            ),
             shrub_max_diameter=float(self._low_veg_defaults["shrub_max_diameter"]),
             shrub_max_top_height=float(self._low_veg_defaults["shrub_max_top_height"]),
             shrub_min_bottom_height=float(self._low_veg_defaults["shrub_min_bottom_height"]),
@@ -3011,6 +3183,21 @@ class SyntheticGenerationDialog(QDialog):
                 if params.grass_max_height > 0.0
                 else self._low_veg_defaults["grass_max_height"]
             ),
+        )
+
+        initial_artifacts_enabled = bool(params.artifacts_enabled)
+        initial_artifact_global_intensity = self._normalize_unit_float(
+            params.artifact_global_intensity,
+            float(self._artifact_defaults["global_intensity"]),
+        )
+        initial_artifact_point_fraction = self._normalize_unit_float(
+            params.artifact_point_fraction,
+            float(self._artifact_defaults["point_fraction"]),
+        )
+        initial_artifact_type_settings = self._normalize_artifact_type_settings(
+            params.artifact_type_settings,
+            self._artifact_type_specs,
+            defaults=self._default_artifact_type_settings,
         )
 
         self.total_points_spin = QSpinBox(self)
@@ -3260,6 +3447,107 @@ class SyntheticGenerationDialog(QDialog):
             self.vehicle_type_percentage_spins[vehicle_type] = spin
 
         self.vehicle_distribution_sum_label = QLabel(self)
+        self.artifacts_enabled_check = QCheckBox("Enable artifact generation", self)
+        self.artifacts_enabled_check.setChecked(initial_artifacts_enabled)
+        self.artifacts_enabled_check.setToolTip(
+            "Generate synthetic measurement defects and acquisition errors for class 6."
+        )
+        self.artifacts_enabled_check.toggled.connect(self._update_artifact_settings_state)
+
+        self.artifact_global_intensity_spin = QDoubleSpinBox(self)
+        self.artifact_global_intensity_spin.setRange(0.0, 1.0)
+        self.artifact_global_intensity_spin.setDecimals(2)
+        self.artifact_global_intensity_spin.setSingleStep(0.05)
+        self.artifact_global_intensity_spin.setValue(initial_artifact_global_intensity)
+        self.artifact_global_intensity_spin.setToolTip(
+            "Global multiplier for all artifact generators in the range [0, 1]."
+        )
+        self.artifact_global_intensity_spin.valueChanged.connect(
+            self._update_artifact_settings_state
+        )
+
+        self.artifact_point_fraction_spin = QDoubleSpinBox(self)
+        self.artifact_point_fraction_spin.setRange(0.0, 1.0)
+        self.artifact_point_fraction_spin.setDecimals(3)
+        self.artifact_point_fraction_spin.setSingleStep(0.01)
+        self.artifact_point_fraction_spin.setValue(initial_artifact_point_fraction)
+        self.artifact_point_fraction_spin.setToolTip(
+            "Final share of class 6 points. Remaining class shares are rescaled proportionally."
+        )
+        self.artifact_point_fraction_spin.valueChanged.connect(self._update_artifact_settings_state)
+
+        self.artifact_type_group_boxes: Dict[str, QGroupBox] = {}
+        self.artifact_type_enable_checks: Dict[str, QCheckBox] = {}
+        self.artifact_type_intensity_spins: Dict[str, QDoubleSpinBox] = {}
+        self.artifact_type_amount_spins: Dict[str, QDoubleSpinBox] = {}
+        self.artifact_type_param_spins: Dict[str, Dict[str, QDoubleSpinBox]] = {}
+
+        for spec in self._artifact_type_specs:
+            artifact_key = str(spec["key"])
+            artifact_settings = initial_artifact_type_settings[artifact_key]
+
+            group_box = QGroupBox(str(spec["label"]), self)
+            group_box.setToolTip(str(spec.get("tooltip", "")))
+            group_layout = QFormLayout(group_box)
+
+            enable_check = QCheckBox("Enable this artifact type", group_box)
+            enable_check.setChecked(bool(artifact_settings["enabled"]))
+            enable_check.setToolTip(str(spec.get("tooltip", "")))
+            enable_check.toggled.connect(self._update_artifact_settings_state)
+            group_layout.addRow("", enable_check)
+
+            intensity_spin = QDoubleSpinBox(group_box)
+            intensity_spin.setRange(0.0, 1.0)
+            intensity_spin.setDecimals(2)
+            intensity_spin.setSingleStep(0.05)
+            intensity_spin.setValue(float(artifact_settings["intensity"]))
+            intensity_spin.setToolTip(
+                "Local intensity multiplier for this artifact type in the range [0, 1]."
+            )
+            intensity_spin.valueChanged.connect(self._update_artifact_settings_state)
+            intensity_label = QLabel("Type intensity [0..1]:", group_box)
+            intensity_label.setToolTip(intensity_spin.toolTip())
+            group_layout.addRow(intensity_label, intensity_spin)
+
+            amount_spin = QDoubleSpinBox(group_box)
+            amount_spin.setRange(0.0, 1.0)
+            amount_spin.setDecimals(3)
+            amount_spin.setSingleStep(0.01)
+            amount_spin.setValue(float(artifact_settings["amount"]))
+            amount_spin.setToolTip(
+                "Relative amount of this artifact type among enabled artifact generators in the range [0, 1]."
+            )
+            amount_spin.valueChanged.connect(self._update_artifact_settings_state)
+            amount_label = QLabel("Relative amount [0..1]:", group_box)
+            amount_label.setToolTip(amount_spin.toolTip())
+            group_layout.addRow(amount_label, amount_spin)
+
+            param_spins: Dict[str, QDoubleSpinBox] = {}
+            for param_spec in spec.get("params", ()):  # type: ignore[union-attr]
+                param_key = str(param_spec["key"])
+                spin = QDoubleSpinBox(group_box)
+                spin.setRange(float(param_spec["min"]), float(param_spec["max"]))
+                spin.setDecimals(int(param_spec.get("decimals", 2)))
+                spin.setSingleStep(float(param_spec.get("step", 0.1)))
+                spin.setValue(float(artifact_settings[param_key]))
+                suffix = str(param_spec.get("suffix", ""))
+                if suffix:
+                    spin.setSuffix(suffix)
+                tooltip = str(param_spec.get("tooltip", ""))
+                spin.setToolTip(tooltip)
+                spin.valueChanged.connect(self._update_artifact_settings_state)
+                label = QLabel(f"{param_spec['label']}:", group_box)
+                label.setToolTip(tooltip)
+                group_layout.addRow(label, spin)
+                param_spins[param_key] = spin
+
+            self.artifact_type_group_boxes[artifact_key] = group_box
+            self.artifact_type_enable_checks[artifact_key] = enable_check
+            self.artifact_type_intensity_spins[artifact_key] = intensity_spin
+            self.artifact_type_amount_spins[artifact_key] = amount_spin
+            self.artifact_type_param_spins[artifact_key] = param_spins
+
+        self.artifact_validation_label = QLabel(self)
         self.custom_shrub_count_check = QCheckBox("Use custom shrub count", self)
         self.custom_shrub_count_check.setChecked(bool(params.custom_shrub_count))
         self.custom_shrub_count_check.toggled.connect(self._update_low_vegetation_state)
@@ -3335,6 +3623,35 @@ class SyntheticGenerationDialog(QDialog):
         self.grass_max_height_spin.valueChanged.connect(self._update_low_vegetation_state)
 
         self.low_vegetation_validation_label = QLabel(self)
+
+        form_general = QFormLayout()
+        artifact_hint_label = QLabel(
+            "Artifact point fraction controls the final share of class 6 points. The remaining classes are rescaled proportionally.",
+            self,
+        )
+        artifact_hint_label.setWordWrap(True)
+
+        form_artifact = QFormLayout()
+        form_artifact.addRow("", self.artifacts_enabled_check)
+        artifact_global_intensity_label = QLabel("Global intensity [0..1]:", self)
+        artifact_global_intensity_label.setToolTip(self.artifact_global_intensity_spin.toolTip())
+        form_artifact.addRow(artifact_global_intensity_label, self.artifact_global_intensity_spin)
+        artifact_point_fraction_label = QLabel("Artifact point fraction [0..1]:", self)
+        artifact_point_fraction_label.setToolTip(self.artifact_point_fraction_spin.toolTip())
+        form_artifact.addRow(artifact_point_fraction_label, self.artifact_point_fraction_spin)
+        form_artifact.addRow("Validation:", self.artifact_validation_label)
+
+        artifact_types_container = QWidget(self)
+        artifact_types_layout = QVBoxLayout(artifact_types_container)
+        artifact_types_layout.setContentsMargins(0, 0, 0, 0)
+        artifact_types_layout.setSpacing(10)
+        for artifact_key in self._artifact_types:
+            artifact_types_layout.addWidget(self.artifact_type_group_boxes[artifact_key])
+        artifact_types_layout.addStretch(1)
+
+        artifact_types_scroll = QScrollArea(self)
+        artifact_types_scroll.setWidgetResizable(True)
+        artifact_types_scroll.setWidget(artifact_types_container)
 
         form_general = QFormLayout()
         form_general.addRow("Total points:", self.total_points_spin)
@@ -3452,6 +3769,13 @@ class SyntheticGenerationDialog(QDialog):
         artificial_surface_layout.addStretch(1)
         tabs.addTab(artificial_surface_tab, "Artificial Surface")
 
+        artifact_tab = QWidget(self)
+        artifact_layout = QVBoxLayout(artifact_tab)
+        artifact_layout.addLayout(form_artifact)
+        artifact_layout.addWidget(artifact_hint_label)
+        artifact_layout.addWidget(artifact_types_scroll)
+        tabs.addTab(artifact_tab, "Artifacts")
+
         building_tab = QWidget(self)
         building_layout = QVBoxLayout(building_tab)
         building_layout.addLayout(form_building)
@@ -3491,7 +3815,8 @@ class SyntheticGenerationDialog(QDialog):
         note = QLabel(
             (
                 "Generation uses utils/synthetic_labeled_point_cloud.py pipeline. "
-                "When custom distributions are enabled, percentages must sum to 100%."
+                "When custom distributions are enabled, percentages must sum to 100%. "
+                "Artifact point fraction controls the final share of class 6."
             ),
             self,
         )
@@ -3525,6 +3850,7 @@ class SyntheticGenerationDialog(QDialog):
 
         self._update_class_distribution_state()
         self._update_artificial_surface_settings_state()
+        self._update_artifact_settings_state()
         self._update_building_state()
         self._update_structure_settings_state()
         self._update_high_vegetation_state()
@@ -3551,6 +3877,22 @@ class SyntheticGenerationDialog(QDialog):
             return None
         self._synthetic_module = synthetic_module
         return self._synthetic_module
+
+    @staticmethod
+    def _copy_artifact_type_settings(
+        settings: Optional[Mapping[str, Mapping[str, object]]],
+    ) -> Dict[str, Dict[str, object]]:
+        if not isinstance(settings, Mapping):
+            return {}
+        copied: Dict[str, Dict[str, object]] = {}
+        for artifact_key, artifact_settings in settings.items():
+            if not isinstance(artifact_settings, Mapping):
+                continue
+            copied[str(artifact_key)] = {
+                str(field_name): field_value
+                for field_name, field_value in artifact_settings.items()
+            }
+        return copied
 
     def restore_defaults(self) -> None:
         self._apply_params(self._default_generation_params)
@@ -3594,6 +3936,11 @@ class SyntheticGenerationDialog(QDialog):
             values=params.vehicle_type_percentages,
             class_count=len(self._vehicle_types),
             fallback=FALLBACK_VEHICLE_TYPE_PERCENTAGES,
+        )
+        artifact_type_settings = self._normalize_artifact_type_settings(
+            params.artifact_type_settings,
+            self._artifact_type_specs,
+            defaults=self._default_artifact_type_settings,
         )
 
         _set_spin_value(self.total_points_spin, int(params.total_points), "total_points")
@@ -3693,6 +4040,46 @@ class SyntheticGenerationDialog(QDialog):
                 f"vehicle_type_percentages[{vehicle_type}]",
             )
 
+        self.artifacts_enabled_check.setChecked(bool(params.artifacts_enabled))
+        _set_spin_value(
+            self.artifact_global_intensity_spin,
+            self._normalize_unit_float(
+                params.artifact_global_intensity,
+                float(self._artifact_defaults["global_intensity"]),
+            ),
+            "artifact_global_intensity",
+        )
+        _set_spin_value(
+            self.artifact_point_fraction_spin,
+            self._normalize_unit_float(
+                params.artifact_point_fraction,
+                float(self._artifact_defaults["point_fraction"]),
+            ),
+            "artifact_point_fraction",
+        )
+        for spec in self._artifact_type_specs:
+            artifact_key = str(spec["key"])
+            self.artifact_type_enable_checks[artifact_key].setChecked(
+                bool(artifact_type_settings[artifact_key]["enabled"])
+            )
+            _set_spin_value(
+                self.artifact_type_intensity_spins[artifact_key],
+                float(artifact_type_settings[artifact_key]["intensity"]),
+                f"artifact_type_settings[{artifact_key}][intensity]",
+            )
+            _set_spin_value(
+                self.artifact_type_amount_spins[artifact_key],
+                float(artifact_type_settings[artifact_key]["amount"]),
+                f"artifact_type_settings[{artifact_key}][amount]",
+            )
+            for param_spec in spec.get("params", ()):  # type: ignore[union-attr]
+                param_key = str(param_spec["key"])
+                _set_spin_value(
+                    self.artifact_type_param_spins[artifact_key][param_key],
+                    float(artifact_type_settings[artifact_key][param_key]),
+                    f"artifact_type_settings[{artifact_key}][{param_key}]",
+                )
+
         self.custom_shrub_count_check.setChecked(bool(params.custom_shrub_count))
         _set_spin_value(self.shrub_count_spin, int(params.shrub_count), "shrub_count")
         self.random_shrub_size_check.setChecked(bool(params.random_shrub_size))
@@ -3737,6 +4124,7 @@ class SyntheticGenerationDialog(QDialog):
 
         self._update_class_distribution_state()
         self._update_artificial_surface_settings_state()
+        self._update_artifact_settings_state()
         self._update_building_state()
         self._update_structure_settings_state()
         self._update_high_vegetation_state()
@@ -3763,6 +4151,9 @@ class SyntheticGenerationDialog(QDialog):
             errors.append(
                 "When custom building roof type distribution is enabled, percentages must sum to 100%."
             )
+        artifact_error = self._artifact_validation_error()
+        if artifact_error is not None:
+            errors.append(artifact_error)
         if not self._is_structure_distribution_valid():
             errors.append(
                 "When custom structure type distribution is enabled, percentages must sum to 100%."
@@ -4018,6 +4409,206 @@ class SyntheticGenerationDialog(QDialog):
             out[key] = value_f
         return out
 
+
+    @staticmethod
+    def _normalize_unit_float(value: object, fallback: float) -> float:
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+        if not np.isfinite(value_f):
+            return float(fallback)
+        return float(np.clip(value_f, 0.0, 1.0))
+
+    @staticmethod
+    def _normalize_float_in_range(
+        value: object,
+        fallback: float,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+        if not np.isfinite(value_f):
+            return float(fallback)
+        return float(np.clip(value_f, minimum, maximum))
+
+    @staticmethod
+    def _normalize_artifact_defaults(
+        artifact_defaults: Optional[Mapping[str, object]],
+    ) -> Dict[str, object]:
+        defaults: Dict[str, object] = {
+            "enabled": FALLBACK_ARTIFACTS_ENABLED,
+            "global_intensity": FALLBACK_ARTIFACT_GLOBAL_INTENSITY,
+            "point_fraction": FALLBACK_ARTIFACT_POINT_FRACTION,
+        }
+        if not isinstance(artifact_defaults, Mapping):
+            return defaults
+
+        defaults["enabled"] = bool(artifact_defaults.get("enabled", defaults["enabled"]))
+        defaults["global_intensity"] = SyntheticGenerationDialog._normalize_unit_float(
+            artifact_defaults.get("global_intensity", defaults["global_intensity"]),
+            float(defaults["global_intensity"]),
+        )
+        defaults["point_fraction"] = SyntheticGenerationDialog._normalize_unit_float(
+            artifact_defaults.get("point_fraction", defaults["point_fraction"]),
+            float(defaults["point_fraction"]),
+        )
+        return defaults
+
+    @staticmethod
+    def _normalize_artifact_type_specs(
+        artifact_type_specs: Optional[Sequence[Mapping[str, object]]],
+    ) -> Tuple[Dict[str, object], ...]:
+        source = artifact_type_specs if artifact_type_specs else FALLBACK_ARTIFACT_TYPE_SPECS
+        normalized: List[Dict[str, object]] = []
+        seen: Set[str] = set()
+        for raw_spec in source:
+            if not isinstance(raw_spec, Mapping):
+                continue
+            artifact_key = str(raw_spec.get("key", "")).strip()
+            if not artifact_key or artifact_key in seen:
+                continue
+            seen.add(artifact_key)
+
+            params: List[Dict[str, object]] = []
+            raw_params = raw_spec.get("params", ())
+            if isinstance(raw_params, Sequence) and not isinstance(
+                raw_params,
+                (str, bytes, bytearray),
+            ):
+                for raw_param in raw_params:
+                    if not isinstance(raw_param, Mapping):
+                        continue
+                    param_key = str(raw_param.get("key", "")).strip()
+                    if not param_key:
+                        continue
+                    minimum = float(raw_param.get("min", 0.0))
+                    maximum = float(raw_param.get("max", max(1.0, minimum)))
+                    if maximum < minimum:
+                        maximum = minimum
+                    default_value = SyntheticGenerationDialog._normalize_float_in_range(
+                        raw_param.get("default", minimum),
+                        minimum,
+                        minimum,
+                        maximum,
+                    )
+                    params.append(
+                        {
+                            "key": param_key,
+                            "label": str(raw_param.get("label", param_key.replace("_", " ").title())),
+                            "default": default_value,
+                            "min": minimum,
+                            "max": maximum,
+                            "step": float(raw_param.get("step", 0.1)),
+                            "decimals": int(raw_param.get("decimals", 2)),
+                            "suffix": str(raw_param.get("suffix", "")),
+                            "tooltip": str(raw_param.get("tooltip", "")),
+                        }
+                    )
+
+            normalized.append(
+                {
+                    "key": artifact_key,
+                    "label": str(raw_spec.get("label", artifact_key.replace("_", " ").title())),
+                    "tooltip": str(raw_spec.get("tooltip", "")),
+                    "default_enabled": bool(raw_spec.get("default_enabled", True)),
+                    "default_intensity": SyntheticGenerationDialog._normalize_unit_float(
+                        raw_spec.get("default_intensity", 0.5),
+                        0.5,
+                    ),
+                    "default_amount": SyntheticGenerationDialog._normalize_unit_float(
+                        raw_spec.get("default_amount", 0.1),
+                        0.1,
+                    ),
+                    "params": tuple(params),
+                }
+            )
+
+        if not normalized:
+            return tuple(dict(spec) for spec in FALLBACK_ARTIFACT_TYPE_SPECS)
+        return tuple(normalized)
+
+    @staticmethod
+    def _build_default_artifact_type_settings(
+        artifact_type_specs: Sequence[Mapping[str, object]],
+    ) -> Dict[str, Dict[str, object]]:
+        settings: Dict[str, Dict[str, object]] = {}
+        for spec in artifact_type_specs:
+            artifact_key = str(spec["key"])
+            entry: Dict[str, object] = {
+                "enabled": bool(spec.get("default_enabled", True)),
+                "intensity": SyntheticGenerationDialog._normalize_unit_float(
+                    spec.get("default_intensity", 0.5),
+                    0.5,
+                ),
+                "amount": SyntheticGenerationDialog._normalize_unit_float(
+                    spec.get("default_amount", 0.1),
+                    0.1,
+                ),
+            }
+            for param_spec in spec.get("params", ()):  # type: ignore[union-attr]
+                param_key = str(param_spec["key"])
+                entry[param_key] = SyntheticGenerationDialog._normalize_float_in_range(
+                    param_spec.get("default", param_spec.get("min", 0.0)),
+                    float(param_spec.get("default", param_spec.get("min", 0.0))),
+                    float(param_spec.get("min", 0.0)),
+                    float(param_spec.get("max", max(1.0, float(param_spec.get("min", 0.0))))),
+                )
+            settings[artifact_key] = entry
+        return settings
+
+    @staticmethod
+    def _normalize_artifact_type_settings(
+        settings: Optional[Mapping[str, Mapping[str, object]]],
+        artifact_type_specs: Sequence[Mapping[str, object]],
+        defaults: Optional[Mapping[str, Mapping[str, object]]] = None,
+    ) -> Dict[str, Dict[str, object]]:
+        normalized_defaults = SyntheticGenerationDialog._build_default_artifact_type_settings(
+            artifact_type_specs
+        )
+        if isinstance(defaults, Mapping):
+            for artifact_key, artifact_defaults in defaults.items():
+                if artifact_key not in normalized_defaults or not isinstance(artifact_defaults, Mapping):
+                    continue
+                normalized_defaults[artifact_key].update(
+                    SyntheticGenerationDialog._copy_artifact_type_settings(
+                        {artifact_key: artifact_defaults}
+                    )[artifact_key]
+                )
+
+        normalized: Dict[str, Dict[str, object]] = {}
+        source = settings if isinstance(settings, Mapping) else {}
+        for spec in artifact_type_specs:
+            artifact_key = str(spec["key"])
+            default_entry = normalized_defaults[artifact_key]
+            raw_entry = source.get(artifact_key, {})
+            if not isinstance(raw_entry, Mapping):
+                raw_entry = {}
+            entry: Dict[str, object] = {
+                "enabled": bool(raw_entry.get("enabled", default_entry["enabled"])),
+                "intensity": SyntheticGenerationDialog._normalize_unit_float(
+                    raw_entry.get("intensity", default_entry["intensity"]),
+                    float(default_entry["intensity"]),
+                ),
+                "amount": SyntheticGenerationDialog._normalize_unit_float(
+                    raw_entry.get("amount", default_entry["amount"]),
+                    float(default_entry["amount"]),
+                ),
+            }
+            for param_spec in spec.get("params", ()):  # type: ignore[union-attr]
+                param_key = str(param_spec["key"])
+                entry[param_key] = SyntheticGenerationDialog._normalize_float_in_range(
+                    raw_entry.get(param_key, default_entry[param_key]),
+                    float(default_entry[param_key]),
+                    float(param_spec["min"]),
+                    float(param_spec["max"]),
+                )
+            normalized[artifact_key] = entry
+        return normalized
+
     @staticmethod
     def _normalize_percentages(
         values: Optional[Sequence[float]],
@@ -4082,6 +4673,23 @@ class SyntheticGenerationDialog(QDialog):
             for vehicle_type in self._vehicle_types
         )
 
+    def _current_artifact_type_settings(self) -> Dict[str, Dict[str, object]]:
+        settings: Dict[str, Dict[str, object]] = {}
+        for spec in self._artifact_type_specs:
+            artifact_key = str(spec["key"])
+            entry: Dict[str, object] = {
+                "enabled": bool(self.artifact_type_enable_checks[artifact_key].isChecked()),
+                "intensity": float(self.artifact_type_intensity_spins[artifact_key].value()),
+                "amount": float(self.artifact_type_amount_spins[artifact_key].value()),
+            }
+            for param_spec in spec.get("params", ()):  # type: ignore[union-attr]
+                param_key = str(param_spec["key"])
+                entry[param_key] = float(
+                    self.artifact_type_param_spins[artifact_key][param_key].value()
+                )
+            settings[artifact_key] = entry
+        return settings
+
     def _is_class_distribution_valid(self) -> bool:
         if not self.custom_distribution_check.isChecked():
             return True
@@ -4139,6 +4747,32 @@ class SyntheticGenerationDialog(QDialog):
         has_positive = bool(np.any(percentages > 0.0))
         return has_positive and abs(total - 100.0) <= 0.01
 
+    def _artifact_validation_error(self) -> Optional[str]:
+        if not self.artifacts_enabled_check.isChecked():
+            return None
+
+        point_fraction = float(self.artifact_point_fraction_spin.value())
+        if point_fraction <= 0.0:
+            return None
+
+        enabled_types = [
+            artifact_key
+            for artifact_key in self._artifact_types
+            if self.artifact_type_enable_checks[artifact_key].isChecked()
+        ]
+        if not enabled_types:
+            return "Enable at least one artifact type or set artifact point fraction to 0."
+
+        has_positive_amount = any(
+            float(self.artifact_type_amount_spins[artifact_key].value()) > 0.0
+            for artifact_key in enabled_types
+        )
+        if not has_positive_amount:
+            return (
+                "At least one enabled artifact type must have relative amount greater than 0 when artifact point fraction is above 0."
+            )
+        return None
+
     def _building_validation_error(self) -> Optional[str]:
         floor_min = int(self.building_floor_min_spin.value())
         floor_max = int(self.building_floor_max_spin.value())
@@ -4176,6 +4810,45 @@ class SyntheticGenerationDialog(QDialog):
         for spin in self.artificial_surface_type_percentage_spins.values():
             spin.setEnabled(is_custom_distribution)
         self._update_artificial_surface_distribution_summary()
+        self._update_ok_button_state()
+
+    def _update_artifact_settings_state(self) -> None:
+        artifacts_enabled = bool(self.artifacts_enabled_check.isChecked())
+        self.artifact_global_intensity_spin.setEnabled(artifacts_enabled)
+        self.artifact_point_fraction_spin.setEnabled(artifacts_enabled)
+
+        for artifact_key in self._artifact_types:
+            self.artifact_type_enable_checks[artifact_key].setEnabled(artifacts_enabled)
+            type_controls_enabled = (
+                artifacts_enabled and self.artifact_type_enable_checks[artifact_key].isChecked()
+            )
+            self.artifact_type_intensity_spins[artifact_key].setEnabled(type_controls_enabled)
+            self.artifact_type_amount_spins[artifact_key].setEnabled(type_controls_enabled)
+            for spin in self.artifact_type_param_spins[artifact_key].values():
+                spin.setEnabled(type_controls_enabled)
+
+        error = self._artifact_validation_error()
+        if not artifacts_enabled:
+            self.artifact_validation_label.setText("Artifact generation is disabled.")
+            self.artifact_validation_label.setStyleSheet("color: #666666;")
+        elif error is None and float(self.artifact_point_fraction_spin.value()) <= 0.0:
+            self.artifact_validation_label.setText(
+                "Artifact generation is enabled, but point fraction is 0. No artifact points will be emitted."
+            )
+            self.artifact_validation_label.setStyleSheet("color: #666666;")
+        elif error is None:
+            enabled_count = sum(
+                1
+                for artifact_key in self._artifact_types
+                if self.artifact_type_enable_checks[artifact_key].isChecked()
+            )
+            self.artifact_validation_label.setText(
+                f"Valid | Enabled artifact types: {enabled_count}"
+            )
+            self.artifact_validation_label.setStyleSheet("color: #1f7a1f;")
+        else:
+            self.artifact_validation_label.setText(error)
+            self.artifact_validation_label.setStyleSheet("color: #b00020;")
         self._update_ok_button_state()
 
     def _update_building_state(self) -> None:
@@ -4396,6 +5069,7 @@ class SyntheticGenerationDialog(QDialog):
             and self._is_structure_distribution_valid()
             and self._is_tree_crown_distribution_valid()
             and self._is_vehicle_distribution_valid()
+            and self._artifact_validation_error() is None
             and self._building_validation_error() is None
             and self._high_vegetation_validation_error() is None
             and self._low_vegetation_validation_error() is None
@@ -4457,6 +5131,10 @@ class SyntheticGenerationDialog(QDialog):
             vehicle_count=int(self.vehicle_count_spin.value()),
             custom_vehicle_type_distribution=bool(self.custom_vehicle_type_check.isChecked()),
             vehicle_type_percentages=self._current_vehicle_type_percentages(),
+            artifacts_enabled=bool(self.artifacts_enabled_check.isChecked()),
+            artifact_global_intensity=float(self.artifact_global_intensity_spin.value()),
+            artifact_point_fraction=float(self.artifact_point_fraction_spin.value()),
+            artifact_type_settings=self._current_artifact_type_settings(),
             custom_shrub_count=bool(self.custom_shrub_count_check.isChecked()),
             shrub_count=int(self.shrub_count_spin.value()),
             random_shrub_size=bool(self.random_shrub_size_check.isChecked()),
@@ -6689,6 +7367,8 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             if self._status_progress_bar.isVisible():
                 self._finish_status_progress()
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
 
         self.statusBar().showMessage(
             f"Saved {len(result.files)} class PLY files to {output_dir}",
@@ -7184,6 +7864,13 @@ class MainWindow(QMainWindow):
                     for key in FALLBACK_TREE_CROWN_TYPES
                 )
         high_veg_defaults = getattr(synthetic_module, "HIGH_VEG_DEFAULTS", None)
+        artifact_defaults = getattr(synthetic_module, "ARTIFACT_DEFAULTS", None)
+        artifact_type_specs = getattr(synthetic_module, "ARTIFACT_TYPE_SPECS", None)
+        default_artifact_type_settings = getattr(
+            synthetic_module,
+            "DEFAULT_ARTIFACT_TYPE_SETTINGS",
+            None,
+        )
         vehicle_type_names = getattr(synthetic_module, "VEHICLE_TYPE_NAMES", None)
         default_vehicle_type_percentages = getattr(
             synthetic_module,
@@ -7233,6 +7920,17 @@ class MainWindow(QMainWindow):
             vehicle_type_names=vehicle_type_names if isinstance(vehicle_type_names, dict) else None,
             default_vehicle_type_percentages=default_vehicle_type_percentages,
             low_veg_defaults=low_veg_defaults if isinstance(low_veg_defaults, dict) else None,
+            artifact_defaults=artifact_defaults if isinstance(artifact_defaults, Mapping) else None,
+            artifact_type_specs=(
+                artifact_type_specs
+                if isinstance(artifact_type_specs, (list, tuple))
+                else None
+            ),
+            default_artifact_type_settings=(
+                default_artifact_type_settings
+                if isinstance(default_artifact_type_settings, Mapping)
+                else None
+            ),
             synthetic_module=synthetic_module,
             parent=self,
         )
@@ -7240,6 +7938,7 @@ class MainWindow(QMainWindow):
             return
         params = dialog.params()
 
+        self._begin_status_progress("Generating synthetic cloud")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             generated_cloud = synthetic_module.generate_point_cloud(
@@ -7311,6 +8010,12 @@ class MainWindow(QMainWindow):
                     if params.custom_vehicle_type_distribution
                     else None
                 ),
+                artifacts_enabled=bool(params.artifacts_enabled),
+                artifact_global_intensity=float(params.artifact_global_intensity),
+                artifact_point_fraction=float(params.artifact_point_fraction),
+                artifact_type_settings=SyntheticGenerationDialog._copy_artifact_type_settings(
+                    params.artifact_type_settings
+                ),
                 shrub_count=(
                     params.shrub_count
                     if params.custom_shrub_count
@@ -7329,12 +8034,16 @@ class MainWindow(QMainWindow):
                 grass_patch_max_size_x=float(params.grass_patch_max_size_x),
                 grass_patch_max_size_y=float(params.grass_patch_max_size_y),
                 grass_max_height=float(params.grass_max_height),
+                progress_callback=self._update_status_progress,
             )
         except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
             QMessageBox.critical(self, "Generation Error", f"Failed to generate point cloud:\n{exc}")
             return
         finally:
             QApplication.restoreOverrideCursor()
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
 
         try:
             cloud = self._cloud_from_generated(generated_cloud, params, synthetic_module)
