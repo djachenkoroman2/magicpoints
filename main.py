@@ -968,6 +968,111 @@ class PointCloudOpenDialog(QDialog):
         return self.downsample_limit()
 
 
+class MeshOpenDialog(QDialog):
+    def __init__(self, analysis: "MeshPlyAnalysis", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Open Mesh File")
+        self.setModal(True)
+        self.resize(700, 420)
+
+        file_edit = QLineEdit(self)
+        file_edit.setReadOnly(True)
+        file_edit.setText(analysis.file_path)
+
+        format_edit = QLineEdit(self)
+        format_edit.setReadOnly(True)
+        format_edit.setText(analysis.format_type)
+
+        vertices_edit = QLineEdit(self)
+        vertices_edit.setReadOnly(True)
+        vertices_edit.setText(f"{analysis.vertex_count:,}")
+
+        polygons_edit = QLineEdit(self)
+        polygons_edit.setReadOnly(True)
+        polygons_edit.setText(f"{analysis.polygon_count:,}")
+
+        triangle_edit = QLineEdit(self)
+        triangle_edit.setReadOnly(True)
+        triangle_edit.setText(f"{analysis.triangle_polygon_count:,}")
+
+        other_polygons_edit = QLineEdit(self)
+        other_polygons_edit.setReadOnly(True)
+        other_polygons_edit.setText(f"{analysis.non_triangle_polygon_count:,}")
+
+        vertex_fields_label = QLabel(analysis.formatted_vertex_fields(), self)
+        vertex_fields_label.setWordWrap(True)
+        vertex_fields_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        polygon_fields_label = QLabel(analysis.formatted_face_fields(), self)
+        polygon_fields_label.setWordWrap(True)
+        polygon_fields_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        polygon_summary_label = QLabel(analysis.formatted_polygon_summary(), self)
+        polygon_summary_label.setWordWrap(True)
+        polygon_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        analysis_form = QFormLayout()
+        analysis_form.addRow("File:", file_edit)
+        analysis_form.addRow("Format:", format_edit)
+        analysis_form.addRow("Vertices:", vertices_edit)
+        analysis_form.addRow("Polygons:", polygons_edit)
+        analysis_form.addRow("Triangles:", triangle_edit)
+        analysis_form.addRow("Other polygons:", other_polygons_edit)
+        analysis_form.addRow("Vertex fields:", vertex_fields_label)
+        analysis_form.addRow("Polygon fields:", polygon_fields_label)
+        analysis_form.addRow("Polygon summary:", polygon_summary_label)
+
+        analysis_group = QGroupBox("PLY Analysis", self)
+        analysis_group.setLayout(analysis_form)
+
+        min_bounds_edit = QLineEdit(self)
+        min_bounds_edit.setReadOnly(True)
+        min_bounds_edit.setText(analysis.formatted_bounds_min())
+
+        max_bounds_edit = QLineEdit(self)
+        max_bounds_edit.setReadOnly(True)
+        max_bounds_edit.setText(analysis.formatted_bounds_max())
+
+        size_bounds_edit = QLineEdit(self)
+        size_bounds_edit.setReadOnly(True)
+        size_bounds_edit.setText(analysis.formatted_bounds_size())
+
+        box_form = QFormLayout()
+        box_form.addRow("Min XYZ:", min_bounds_edit)
+        box_form.addRow("Max XYZ:", max_bounds_edit)
+        box_form.addRow("Size XYZ:", size_bounds_edit)
+
+        box_group = QGroupBox("3D Box", self)
+        box_group.setLayout(box_form)
+
+        if analysis.has_only_triangles:
+            note_text = (
+                "The file can be opened as a triangle mesh. The analysis above was collected before loading the full mesh."
+            )
+        else:
+            note_text = (
+                "This file contains non-triangular polygons. Open Mesh File supports triangle meshes only, "
+                "so opening is disabled until the mesh is triangulated."
+            )
+        note_label = QLabel(note_text, self)
+        note_label.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        open_button = buttons.button(QDialogButtonBox.Ok)
+        if open_button is not None:
+            open_button.setText("Open")
+            open_button.setEnabled(analysis.has_only_triangles)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(analysis_group)
+        layout.addWidget(box_group)
+        layout.addWidget(note_label)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+
 class DBSCANDialog(QDialog):
     def __init__(
         self,
@@ -1732,6 +1837,77 @@ class PointCloudPlyAnalysis:
         return ", ".join(formatted) if formatted else "No vertex fields found"
 
 
+@dataclass(frozen=True)
+class MeshPlyAnalysis:
+    file_path: str
+    format_type: str
+    vertex_count: int
+    polygon_count: int
+    vertex_properties: Tuple[PlyProperty, ...]
+    face_properties: Tuple[PlyProperty, ...]
+    triangle_polygon_count: int
+    non_triangle_polygon_count: int
+    polygon_size_histogram: Tuple[Tuple[int, int], ...]
+    bounds_min: Tuple[float, float, float]
+    bounds_max: Tuple[float, float, float]
+    bounds_size: Tuple[float, float, float]
+
+    @property
+    def has_only_triangles(self) -> bool:
+        return self.non_triangle_polygon_count == 0
+
+    def formatted_vertex_fields(self) -> str:
+        formatted: List[str] = []
+        for prop in self.vertex_properties:
+            if prop.kind == "scalar":
+                formatted.append(f"{prop.name} ({prop.dtype})")
+            else:
+                count_dtype = prop.count_dtype or "?"
+                formatted.append(f"{prop.name} (list {count_dtype} {prop.dtype})")
+        return ", ".join(formatted) if formatted else "No vertex fields found"
+
+    def formatted_face_fields(self) -> str:
+        formatted: List[str] = []
+        for prop in self.face_properties:
+            if prop.kind == "scalar":
+                formatted.append(f"{prop.name} ({prop.dtype})")
+            else:
+                count_dtype = prop.count_dtype or "?"
+                formatted.append(f"{prop.name} (list {count_dtype} {prop.dtype})")
+        return ", ".join(formatted) if formatted else "No polygon fields found"
+
+    def formatted_polygon_summary(self) -> str:
+        if not self.polygon_size_histogram:
+            return "No polygons found"
+
+        parts: List[str] = []
+        for polygon_size, count in self.polygon_size_histogram:
+            if polygon_size == 3:
+                label = "triangles"
+            elif polygon_size == 4:
+                label = "quads"
+            elif polygon_size > 0:
+                label = f"{polygon_size}-gons"
+            else:
+                label = f"{polygon_size}-vertex polygons"
+            parts.append(f"{count:,} {label}")
+        return ", ".join(parts)
+
+    def formatted_bounds_min(self) -> str:
+        return self._format_triplet(self.bounds_min)
+
+    def formatted_bounds_max(self) -> str:
+        return self._format_triplet(self.bounds_max)
+
+    def formatted_bounds_size(self) -> str:
+        return self._format_triplet(self.bounds_size)
+
+    @staticmethod
+    def _format_triplet(values: Sequence[float]) -> str:
+        xyz = np.asarray(values, dtype=np.float64).reshape(3)
+        return f"X={xyz[0]:,.6f}, Y={xyz[1]:,.6f}, Z={xyz[2]:,.6f}"
+
+
 class PointCloudLoader:
     LABEL_FIELD_NAMES = [
         "label",
@@ -2319,6 +2495,142 @@ class MeshLoader:
     SUPPORTED_FORMATS = {"ascii", "binary_little_endian", "binary_big_endian"}
 
     @classmethod
+    def analyze_ply(
+        cls,
+        path: str,
+        progress_callback: Optional[LoadProgressCallback] = None,
+    ) -> MeshPlyAnalysis:
+        if not os.path.isfile(path):
+            raise MeshLoaderError(f"File not found: {path}")
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext != ".ply":
+            raise MeshLoaderError(f"Unsupported file extension '{ext}'. Use PLY.")
+
+        try:
+            file_size = max(1, int(os.path.getsize(path)))
+            with open(path, "rb") as fh:
+                format_type, elements, _comments = PointCloudLoader._parse_ply_header(fh)
+                if format_type not in cls.SUPPORTED_FORMATS:
+                    raise MeshLoaderError(f"Unsupported PLY format '{format_type}'.")
+                PointCloudLoader._report_stream_progress(
+                    fh,
+                    file_size,
+                    progress_callback,
+                    "Reading PLY header",
+                )
+
+                vertex_element = next((element for element in elements if element.name.lower() == "vertex"), None)
+                if vertex_element is None:
+                    raise MeshLoaderError("PLY file does not contain a 'vertex' element.")
+
+                face_element = next((element for element in elements if element.name.lower() == "face"), None)
+                if face_element is None or face_element.count <= 0:
+                    raise MeshLoaderError("PLY file does not contain any faces and is not a mesh.")
+
+                face_index_property = cls._find_face_index_property(face_element)
+                if face_index_property is None:
+                    raise MeshLoaderError("PLY face element does not define vertex indices.")
+
+                vertices: Optional[np.ndarray] = None
+                polygon_histogram: Dict[int, int] = {}
+                if format_type == "ascii":
+                    for element in elements:
+                        name = element.name.lower()
+                        if name == "vertex":
+                            columns = PointCloudLoader._read_ascii_element(
+                                fh,
+                                element,
+                                keep=True,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage="Analyzing mesh vertices",
+                            )
+                            assert columns is not None
+                            vertices = cls._vertices_from_columns(columns)
+                        elif name == "face":
+                            polygon_histogram = cls._analyze_ascii_face_sizes(
+                                fh,
+                                element,
+                                face_index_property,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                            )
+                        else:
+                            PointCloudLoader._read_ascii_element(
+                                fh,
+                                element,
+                                keep=False,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage=f"Skipping {element.name} data",
+                            )
+                else:
+                    endian = "<" if format_type == "binary_little_endian" else ">"
+                    for element in elements:
+                        name = element.name.lower()
+                        if name == "vertex":
+                            columns = PointCloudLoader._read_binary_element(
+                                fh,
+                                element,
+                                endian=endian,
+                                keep=True,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage="Analyzing mesh vertices",
+                            )
+                            assert columns is not None
+                            vertices = cls._vertices_from_columns(columns)
+                        elif name == "face":
+                            polygon_histogram = cls._analyze_binary_face_sizes(
+                                fh,
+                                element,
+                                endian,
+                                face_index_property,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                            )
+                        else:
+                            PointCloudLoader._read_binary_element(
+                                fh,
+                                element,
+                                endian=endian,
+                                keep=False,
+                                file_size=file_size,
+                                progress_callback=progress_callback,
+                                stage=f"Skipping {element.name} data",
+                            )
+
+                if vertices is None or vertices.shape[0] == 0:
+                    raise MeshLoaderError("PLY mesh does not contain any vertices.")
+
+        except PointCloudLoaderError as exc:
+            raise MeshLoaderError(str(exc)) from exc
+
+        mins = np.min(vertices, axis=0).astype(np.float64, copy=False)
+        maxs = np.max(vertices, axis=0).astype(np.float64, copy=False)
+        size = maxs - mins
+        triangle_count = int(polygon_histogram.get(3, 0))
+        non_triangle_count = int(
+            sum(count for polygon_size, count in polygon_histogram.items() if int(polygon_size) != 3)
+        )
+
+        return MeshPlyAnalysis(
+            file_path=path,
+            format_type=format_type,
+            vertex_count=int(vertex_element.count),
+            polygon_count=int(face_element.count),
+            vertex_properties=tuple(vertex_element.properties),
+            face_properties=tuple(face_element.properties),
+            triangle_polygon_count=triangle_count,
+            non_triangle_polygon_count=non_triangle_count,
+            polygon_size_histogram=tuple(sorted((int(size_key), int(count)) for size_key, count in polygon_histogram.items())),
+            bounds_min=(float(mins[0]), float(mins[1]), float(mins[2])),
+            bounds_max=(float(maxs[0]), float(maxs[1]), float(maxs[2])),
+            bounds_size=(float(size[0]), float(size[1]), float(size[2])),
+        )
+
+    @classmethod
     def load_ply(
         cls,
         path: str,
@@ -2615,6 +2927,122 @@ class MeshLoader:
                 )
 
         return triangles
+
+    @classmethod
+    def _analyze_ascii_face_sizes(
+        cls,
+        fh,
+        element: PlyElement,
+        face_index_property: PlyProperty,
+        file_size: int = 0,
+        progress_callback: Optional[LoadProgressCallback] = None,
+    ) -> Dict[int, int]:
+        histogram: Dict[int, int] = {}
+        target_name = normalize_field_name(face_index_property.name)
+        report_interval = PointCloudLoader._progress_row_interval(element.count)
+
+        for row_index in range(element.count):
+            line = fh.readline()
+            if not line:
+                raise MeshLoaderError(
+                    f"Unexpected end of PLY file while reading ASCII element '{element.name}'."
+                )
+            tokens = line.decode("ascii", errors="ignore").strip().split()
+            token_idx = 0
+            polygon_size: Optional[int] = None
+
+            for prop in element.properties:
+                if prop.kind == "scalar":
+                    if token_idx >= len(tokens):
+                        raise MeshLoaderError(
+                            f"Malformed ASCII PLY row {row_index + 1} in element '{element.name}'."
+                        )
+                    token_idx += 1
+                    continue
+
+                if token_idx >= len(tokens):
+                    raise MeshLoaderError(
+                        f"Malformed list property in ASCII PLY row {row_index + 1}."
+                    )
+                try:
+                    list_count = int(float(tokens[token_idx]))
+                except ValueError as exc:
+                    raise MeshLoaderError(
+                        f"Invalid list count in ASCII PLY row {row_index + 1}."
+                    ) from exc
+                if list_count < 0:
+                    raise MeshLoaderError(f"Negative polygon size in ASCII PLY row {row_index + 1}.")
+                token_idx += 1
+                if token_idx + list_count > len(tokens):
+                    raise MeshLoaderError(
+                        f"List property overflow in ASCII PLY row {row_index + 1}."
+                    )
+                if normalize_field_name(prop.name) == target_name:
+                    polygon_size = list_count
+                token_idx += list_count
+
+            if polygon_size is None:
+                raise MeshLoaderError(f"PLY face row {row_index + 1} does not provide vertex indices.")
+            histogram[polygon_size] = histogram.get(polygon_size, 0) + 1
+
+            if (row_index + 1) % report_interval == 0 or (row_index + 1) == element.count:
+                PointCloudLoader._report_stream_progress(
+                    fh,
+                    file_size,
+                    progress_callback,
+                    "Analyzing mesh polygons",
+                )
+
+        return histogram
+
+    @classmethod
+    def _analyze_binary_face_sizes(
+        cls,
+        fh,
+        element: PlyElement,
+        endian: str,
+        face_index_property: PlyProperty,
+        file_size: int = 0,
+        progress_callback: Optional[LoadProgressCallback] = None,
+    ) -> Dict[int, int]:
+        histogram: Dict[int, int] = {}
+        target_name = normalize_field_name(face_index_property.name)
+        report_interval = PointCloudLoader._progress_row_interval(element.count)
+
+        for row_index in range(element.count):
+            polygon_size: Optional[int] = None
+            for prop in element.properties:
+                if prop.kind == "scalar":
+                    PointCloudLoader._read_binary_value(fh, endian, prop.dtype)
+                    continue
+
+                assert prop.count_dtype is not None
+                list_count = int(PointCloudLoader._read_binary_value(fh, endian, prop.count_dtype))
+                if list_count < 0:
+                    raise MeshLoaderError(f"Negative polygon size in binary PLY row {row_index + 1}.")
+                if normalize_field_name(prop.name) == target_name:
+                    polygon_size = list_count
+                skip_size = list_count * PointCloudLoader._type_size(prop.dtype)
+                if skip_size > 0:
+                    skipped = fh.read(skip_size)
+                    if len(skipped) != skip_size:
+                        raise MeshLoaderError(
+                            f"Unexpected EOF while skipping binary list data in element '{element.name}'."
+                        )
+
+            if polygon_size is None:
+                raise MeshLoaderError(f"PLY face row {row_index + 1} does not provide vertex indices.")
+            histogram[polygon_size] = histogram.get(polygon_size, 0) + 1
+
+            if (row_index + 1) % report_interval == 0 or (row_index + 1) == element.count:
+                PointCloudLoader._report_stream_progress(
+                    fh,
+                    file_size,
+                    progress_callback,
+                    "Analyzing mesh polygons",
+                )
+
+        return histogram
 
     @classmethod
     def _read_binary_faces(
@@ -7902,10 +8330,31 @@ class MainWindow(QMainWindow):
             self,
             "Open Mesh File",
             start_dir,
-            "PLY Mesh Files (*.ply);;PLY Files (*.ply);;All Files (*)",
+            "PLY Mesh Files (*.ply)",
         )
-        if path:
-            self.load_mesh_file(path)
+        if not path:
+            return
+
+        self._begin_status_progress("Analyzing mesh")
+        try:
+            analysis = MeshLoader.analyze_ply(path, progress_callback=self._update_status_progress)
+        except MeshLoaderError as exc:
+            self._finish_status_progress()
+            QMessageBox.critical(self, "Load Error", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._finish_status_progress()
+            QMessageBox.critical(self, "Load Error", f"Unexpected error while analyzing mesh file:\n{exc}")
+            return
+        finally:
+            if self._status_progress_bar.isVisible():
+                self._finish_status_progress()
+
+        dialog = MeshOpenDialog(analysis, parent=self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        self.load_mesh_file(path)
 
     def load_mesh_file(self, path: str) -> None:
         self._begin_status_progress("Loading mesh")
