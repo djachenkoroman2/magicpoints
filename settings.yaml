@@ -1,6 +1,28 @@
 output_directory: data
 point_size: 3.0
 viewport_background: '#000000'
+label_colors:
+  0: '#34C7D8'
+  1: '#8C6338'
+  2: '#0D731F'
+  3: '#59BF4C'
+  4: '#D1382E'
+  5: '#D9AD33'
+  6: '#AD2EB8'
+  7: '#2666D9'
+  8: '#E92D6C'
+  9: '#3D9DD6'
+  10: '#DDE958'
+  11: '#B330D6'
+  12: '#48E496'
+  13: '#D14B28'
+  14: '#414FE4'
+  15: '#80D14F'
+  16: '#DF32A6'
+  17: '#4DECF2'
+  18: '#DFB024'
+  19: '#903EF2'
+  20: '#53DB69'
 bounding_box_color_mode: single
 bounding_box_color: '#AA55FF'
 bounding_box_line_width: 3.0

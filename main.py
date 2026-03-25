@@ -113,6 +113,21 @@ BOX_COLOR_PRESETS: Tuple[Tuple[str, str], ...] = (
     ("White", "#FFFFFF"),
     ("Black", "#000000"),
 )
+LABEL_COLOR_PRESETS: Tuple[Tuple[str, str], ...] = (
+    ("Gray", "#595959"),
+    ("Brown", "#8C6438"),
+    ("Dark Green", "#0D731F"),
+    ("Light Green", "#59BF4C"),
+    ("Red", "#D13832"),
+    ("Orange", "#F28C28"),
+    ("Yellow", "#D9AE33"),
+    ("Blue", "#2E69D9"),
+    ("Cyan", "#34C7D8"),
+    ("Magenta", "#AD2EB8"),
+    ("White", "#FFFFFF"),
+    ("Black", "#000000"),
+)
+DEFAULT_LABEL_COLOR_LABEL_IDS: Tuple[int, ...] = tuple(range(21))
 BOUNDING_BOX_COLOR_MODES = {"random", "single"}
 NAMED_COLOR_PRESETS: Tuple[Tuple[str, str], ...] = COLOR_PRESETS + BOX_COLOR_PRESETS
 DEFAULT_TIN_RENDER_MODE = "shaded"
@@ -127,6 +142,7 @@ class ProjectSettings:
     output_directory: str = "data"
     point_size: float = DEFAULT_POINT_SIZE
     viewport_background: str = DEFAULT_VIEWPORT_BACKGROUND_HEX
+    label_colors: Dict[int, str] = field(default_factory=dict)
     bounding_box_color_mode: str = DEFAULT_BOUNDING_BOX_COLOR_MODE
     bounding_box_color: str = DEFAULT_BOUNDING_BOX_COLOR_HEX
     bounding_box_line_width: float = DEFAULT_BOUNDING_BOX_LINE_WIDTH
@@ -260,6 +276,23 @@ def normalize_color_value(value: object) -> str:
     return color_to_hex(parse_color_value(value))
 
 
+def normalize_project_label_color_settings(value: object) -> Dict[int, str]:
+    if not isinstance(value, Mapping):
+        return {}
+
+    normalized: Dict[int, str] = {}
+    for label, color in value.items():
+        try:
+            label_id = int(label)
+        except (TypeError, ValueError):
+            continue
+        try:
+            normalized[label_id] = normalize_color_value(color)
+        except ValueError:
+            continue
+    return {label_id: normalized[label_id] for label_id in sorted(normalized)}
+
+
 def load_project_settings() -> ProjectSettings:
     settings = ProjectSettings()
     if not SETTINGS_PATH.exists():
@@ -285,6 +318,10 @@ def load_project_settings() -> ProjectSettings:
         )
     except ValueError:
         settings.viewport_background = DEFAULT_VIEWPORT_BACKGROUND_HEX
+
+    settings.label_colors = normalize_project_label_color_settings(
+        raw.get("label_colors", settings.label_colors)
+    )
 
     settings.bounding_box_color_mode = _normalize_bounding_box_color_mode(
         raw.get("bounding_box_color_mode", settings.bounding_box_color_mode)
@@ -321,6 +358,10 @@ def save_project_settings(settings: ProjectSettings) -> None:
         "output_directory": str(settings.output_directory).strip() or "data",
         "point_size": _clamp_point_size(settings.point_size),
         "viewport_background": normalize_color_value(settings.viewport_background),
+        "label_colors": {
+            int(label): color
+            for label, color in normalize_project_label_color_settings(settings.label_colors).items()
+        },
         "bounding_box_color_mode": _normalize_bounding_box_color_mode(settings.bounding_box_color_mode),
         "bounding_box_color": normalize_color_value(settings.bounding_box_color),
         "bounding_box_line_width": _clamp_bounding_box_line_width(settings.bounding_box_line_width),
@@ -490,6 +531,63 @@ def generate_distinct_palette(count: int) -> np.ndarray:
     return palette
 
 
+def normalize_label_color_triplet(value: object) -> Optional[Tuple[float, float, float]]:
+    try:
+        red, green, blue = parse_color_value(value)
+    except ValueError:
+        return None
+    return float(red), float(green), float(blue)
+
+
+def normalize_label_color_mapping(
+    label_colors: Optional[Mapping[int, Sequence[float]] | Mapping[str, Sequence[float]]],
+) -> Dict[int, Tuple[float, float, float]]:
+    if not isinstance(label_colors, Mapping):
+        return {}
+
+    normalized: Dict[int, Tuple[float, float, float]] = {}
+    for label, value in label_colors.items():
+        try:
+            label_id = int(label)
+        except (TypeError, ValueError):
+            continue
+        normalized_color = normalize_label_color_triplet(value)
+        if normalized_color is None:
+            continue
+        normalized[label_id] = normalized_color
+    return normalized
+
+
+def stable_label_color(label: int, attempt: int = 0) -> np.ndarray:
+    hashed = (int(label) * 2654435761 + int(attempt) * 2246822519) & 0xFFFFFFFF
+    hue = float(((hashed ^ (hashed >> 16)) & 0xFFFFFFFF) / 4294967296.0)
+    saturation = 0.62 + 0.22 * (float((hashed >> 9) & 0x7) / 7.0)
+    value = 0.82 + 0.13 * (float((hashed >> 17) & 0x7) / 7.0)
+    return np.asarray(colorsys.hsv_to_rgb(hue, saturation, value), dtype=np.float32)
+
+
+def build_unique_label_color_map(
+    label_ids: Sequence[int],
+    preferred_colors: Optional[Mapping[int, Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+) -> Dict[int, np.ndarray]:
+    resolved_preferred = {
+        label: np.asarray(color, dtype=np.float32)
+        for label, color in normalize_label_color_mapping(preferred_colors).items()
+    }
+
+    used_colors: List[np.ndarray] = []
+    color_map: Dict[int, np.ndarray] = {}
+    for label in sorted({int(label_id) for label_id in label_ids}):
+        color = resolved_preferred.get(label)
+        attempt = 0
+        while color is None or any(np.max(np.abs(existing - color)) < 1e-3 for existing in used_colors):
+            color = stable_label_color(label, attempt)
+            attempt += 1
+        color_map[label] = np.asarray(color, dtype=np.float32)
+        used_colors.append(color_map[label])
+    return color_map
+
+
 BOX_EDGE_VERTEX_PAIRS: Tuple[Tuple[int, int], ...] = (
     (0, 1),
     (1, 2),
@@ -540,7 +638,10 @@ class PointCloudData:
     rgb: Optional[np.ndarray] = None
     file_path: str = ""
     original_count: int = 0
+    label_names: Dict[int, str] = field(default_factory=dict)
+    label_color_map: Dict[int, Tuple[float, float, float]] = field(default_factory=dict)
     _label_color_cache: Optional[np.ndarray] = None
+    _label_color_cache_key: Tuple[Tuple[int, Tuple[float, float, float]], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         self.points = np.ascontiguousarray(self.points, dtype=np.float32)
@@ -548,6 +649,13 @@ class PointCloudData:
             self.labels = np.ascontiguousarray(self.labels.astype(np.int32, copy=False))
         if self.rgb is not None:
             self.rgb = np.ascontiguousarray(self.rgb.astype(np.float32, copy=False))
+        self.label_names = {
+            int(label): str(name)
+            for label, name in (self.label_names.items() if isinstance(self.label_names, Mapping) else [])
+            if str(name).strip()
+        }
+        self.label_color_map = normalize_label_color_mapping(self.label_color_map)
+        self.clear_label_color_cache()
         if self.original_count <= 0:
             self.original_count = int(self.points.shape[0])
 
@@ -592,19 +700,42 @@ class PointCloudData:
             rgb=sub_rgb,
             file_path=self.file_path,
             original_count=self.original_count,
+            label_names=dict(self.label_names),
+            label_color_map=dict(self.label_color_map),
         )
 
-    def label_colors(self) -> np.ndarray:
+    def clear_label_color_cache(self) -> None:
+        self._label_color_cache = None
+        self._label_color_cache_key = ()
+
+    def label_colors(
+        self,
+        preferred_colors: Optional[Mapping[int, Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+    ) -> np.ndarray:
         if not self.has_labels:
             return np.zeros((self.loaded_count, 3), dtype=np.float32)
-        if self._label_color_cache is not None and self._label_color_cache.shape[0] == self.loaded_count:
+
+        normalized_preferred = normalize_label_color_mapping(preferred_colors)
+        cache_key = tuple(sorted((label, color) for label, color in normalized_preferred.items()))
+        if (
+            self._label_color_cache is not None
+            and self._label_color_cache.shape[0] == self.loaded_count
+            and self._label_color_cache_key == cache_key
+        ):
             return self._label_color_cache
 
         assert self.labels is not None
         unique_labels = np.unique(self.labels)
-        palette = generate_distinct_palette(int(unique_labels.shape[0]))
-        mapped_indices = np.searchsorted(unique_labels, self.labels)
-        self._label_color_cache = np.ascontiguousarray(palette[mapped_indices], dtype=np.float32)
+        resolved_preferred_colors = infer_synthetic_label_color_map(self.label_names)
+        resolved_preferred_colors.update(self.label_color_map)
+        resolved_preferred_colors.update(normalized_preferred)
+        resolved_colors = build_unique_label_color_map(unique_labels, preferred_colors=resolved_preferred_colors)
+
+        color_array = np.empty((self.loaded_count, 3), dtype=np.float32)
+        for label, color in resolved_colors.items():
+            color_array[self.labels == label] = color
+        self._label_color_cache = np.ascontiguousarray(color_array, dtype=np.float32)
+        self._label_color_cache_key = cache_key
         return self._label_color_cache
 
 
@@ -1660,7 +1791,7 @@ class PointCloudLoader:
             raise PointCloudLoaderError(f"Unsupported file extension '{ext}'. Use PLY.")
 
         with open(path, "rb") as fh:
-            format_type, elements = cls._parse_ply_header(fh)
+            format_type, elements, _comments = cls._parse_ply_header(fh)
 
         vertex_element = cls._point_cloud_vertex_element(elements)
         scalar_fields, has_rgb, default_scalar_field_name = cls._analyze_vertex_properties(vertex_element.properties)
@@ -1719,7 +1850,7 @@ class PointCloudLoader:
     ) -> PointCloudData:
         file_size = max(1, int(os.path.getsize(path)))
         with open(path, "rb") as fh:
-            format_type, elements = cls._parse_ply_header(fh)
+            format_type, elements, comments = cls._parse_ply_header(fh)
             vertex_element = cls._point_cloud_vertex_element(elements)
             cls._analyze_vertex_properties(vertex_element.properties)
             cls._report_stream_progress(fh, file_size, progress_callback, "Reading PLY header")
@@ -1756,16 +1887,60 @@ class PointCloudLoader:
 
             if vertex_columns is None:
                 raise PointCloudLoaderError("PLY file does not contain a 'vertex' element.")
-            return cls._extract_channels_from_ply_columns(vertex_columns, scalar_field_name=scalar_field_name)
+            return cls._extract_channels_from_ply_columns(
+                vertex_columns,
+                scalar_field_name=scalar_field_name,
+                label_names=cls._parse_label_names_from_ply_comments(comments),
+                label_color_map=cls._parse_label_colors_from_ply_comments(comments),
+            )
+
+    @staticmethod
+    def _parse_label_names_from_ply_comments(comments: Sequence[str]) -> Dict[int, str]:
+        parsed: Dict[int, str] = {}
+        for comment in comments:
+            match = PLY_SYNTHETIC_LABEL_COMMENT_RE.match(str(comment).strip())
+            if match is None:
+                continue
+            try:
+                class_id = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            label_name = match.group(2).strip()
+            if not label_name:
+                continue
+            parsed[class_id] = label_name
+        return parsed
+
+    @staticmethod
+    def _parse_label_colors_from_ply_comments(comments: Sequence[str]) -> Dict[int, Tuple[float, float, float]]:
+        parsed: Dict[int, Tuple[float, float, float]] = {}
+        prefix = f"{PLY_SYNTHETIC_LABEL_COLOR_COMMENT_PREFIX} "
+        for comment in comments:
+            text = str(comment).strip()
+            if not text.startswith(prefix):
+                continue
+            parts = text.split()
+            if len(parts) != 5:
+                continue
+            try:
+                class_id = int(parts[1])
+            except (TypeError, ValueError):
+                continue
+            normalized = normalize_label_color_triplet(parts[2:5])
+            if normalized is None:
+                continue
+            parsed[class_id] = normalized
+        return parsed
 
     @classmethod
-    def _parse_ply_header(cls, fh) -> Tuple[str, List[PlyElement]]:
+    def _parse_ply_header(cls, fh) -> Tuple[str, List[PlyElement], Tuple[str, ...]]:
         first = fh.readline().decode("ascii", errors="ignore").strip()
         if first.lower() != "ply":
             raise PointCloudLoaderError("Invalid PLY file: missing 'ply' magic header.")
 
         format_type: Optional[str] = None
         elements: List[PlyElement] = []
+        comments: List[str] = []
         current_element: Optional[PlyElement] = None
 
         while True:
@@ -1780,7 +1955,10 @@ class PointCloudLoader:
 
             parts = text.split()
             keyword = parts[0].lower()
-            if keyword in {"comment", "obj_info"}:
+            if keyword == "comment":
+                comments.append(" ".join(parts[1:]).strip())
+                continue
+            if keyword == "obj_info":
                 continue
             if keyword == "format":
                 if len(parts) < 2:
@@ -1818,7 +1996,7 @@ class PointCloudLoader:
             raise PointCloudLoaderError("PLY header missing format declaration.")
         if format_type not in {"ascii", "binary_little_endian", "binary_big_endian"}:
             raise PointCloudLoaderError(f"Unsupported PLY format '{format_type}'.")
-        return format_type, elements
+        return format_type, elements, tuple(comments)
 
     @classmethod
     def _point_cloud_vertex_element(cls, elements: Sequence[PlyElement]) -> PlyElement:
@@ -2071,6 +2249,8 @@ class PointCloudLoader:
         cls,
         columns: Dict[str, np.ndarray],
         scalar_field_name: Optional[str] = None,
+        label_names: Optional[Mapping[int, str]] = None,
+        label_color_map: Optional[Mapping[int, Sequence[float]] | Mapping[str, Sequence[float]]] = None,
     ) -> PointCloudData:
         normalized_to_original = {normalize_field_name(name): name for name in columns.keys()}
 
@@ -2116,7 +2296,13 @@ class PointCloudLoader:
                 )
             labels = np.rint(columns[label_name]).astype(np.int32)
 
-        return PointCloudData(points=points, labels=labels, rgb=rgb)
+        return PointCloudData(
+            points=points,
+            labels=labels,
+            rgb=rgb,
+            label_names=dict(label_names or {}),
+            label_color_map=normalize_label_color_mapping(label_color_map),
+        )
 
     @staticmethod
     def _normalize_rgb(rgb: np.ndarray) -> np.ndarray:
@@ -2509,10 +2695,17 @@ class MeshLoader:
         return triangle[0], triangle[1], triangle[2]
 
 
+PLY_SYNTHETIC_LABEL_COMMENT_PREFIX = "magicpoints.class_label"
+PLY_SYNTHETIC_LABEL_COLOR_COMMENT_PREFIX = "magicpoints.class_color"
+PLY_SYNTHETIC_LABEL_COMMENT_RE = re.compile(r"^magicpoints\.class_label\s+(-?\d+)\s+(.+?)\s*$")
+
+
 def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> None:
     points = np.ascontiguousarray(cloud.points, dtype=np.float32)
     if points.ndim != 2 or points.shape[1] != 3:
         raise ValueError("Point cloud points must have shape (N, 3).")
+
+    label_color_map = normalize_label_color_mapping(cloud.label_color_map)
 
     rgb_uint8 = None
     if cloud.rgb is not None and cloud.rgb.size > 0:
@@ -2526,6 +2719,12 @@ def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> 
         labels = np.ascontiguousarray(cloud.labels, dtype=np.int32).reshape(-1)
         if labels.shape[0] != points.shape[0]:
             raise ValueError("Point cloud labels must contain exactly one value per point.")
+
+    label_names = {
+        int(label): str(name)
+        for label, name in (cloud.label_names.items() if isinstance(cloud.label_names, Mapping) else [])
+        if str(name).strip()
+    }
 
     columns: List[np.ndarray] = [points[:, 0], points[:, 1], points[:, 2]]
     fmt = ["%.6f", "%.6f", "%.6f"]
@@ -2556,6 +2755,17 @@ def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> 
     with output_path.open("w", encoding="utf-8") as fh:
         fh.write("ply\n")
         fh.write("format ascii 1.0\n")
+        if labels is not None and label_names:
+            for label in sorted(label_names):
+                fh.write(
+                    f"comment {PLY_SYNTHETIC_LABEL_COMMENT_PREFIX} {int(label)} {label_names[label]}\n"
+                )
+        if labels is not None and label_color_map:
+            for label in sorted(label_color_map):
+                red, green, blue = label_color_map[label]
+                fh.write(
+                    f"comment {PLY_SYNTHETIC_LABEL_COLOR_COMMENT_PREFIX} {int(label)} {red:.6f} {green:.6f} {blue:.6f}\n"
+                )
         fh.write(f"element vertex {points.shape[0]}\n")
         for line in property_lines:
             fh.write(f"{line}\n")
@@ -2573,6 +2783,124 @@ FALLBACK_SYNTHETIC_CLASS_NAMES: Dict[int, str] = {
     6: "Artifacts",
     7: "Vehicles",
 }
+FALLBACK_SYNTHETIC_CLASS_COLORS: Dict[int, Tuple[float, float, float]] = {
+    0: (0.35, 0.35, 0.35),
+    1: (0.55, 0.39, 0.22),
+    2: (0.05, 0.45, 0.12),
+    3: (0.35, 0.75, 0.30),
+    4: (0.82, 0.22, 0.18),
+    5: (0.85, 0.68, 0.20),
+    6: (0.68, 0.18, 0.72),
+    7: (0.15, 0.40, 0.85),
+}
+FALLBACK_SYNTHETIC_CLASS_GENERATION_ORDER: Tuple[int, ...] = (4, 0, 2, 5, 7, 3, 6, 1)
+FALLBACK_SYNTHETIC_CLASS_GENERATION_RULES: Dict[int, str] = {
+    0: "Sampled only inside generated artificial-surface zones; natural-surface sampling is masked out there.",
+    1: "Sampled after object placement and only outside artificial-surface zones.",
+    2: "Trees are placed outside artificial-surface zones and away from building footprints.",
+    3: "Shrubs and grass patches avoid artificial-surface zones and building footprints.",
+    4: "Placed before artificial-surface point sampling to anchor sidewalks/front areas; footprints avoid detached artificial surfaces and other buildings.",
+    5: "Placed after buildings and vegetation; footprints avoid building footprints.",
+    6: "Generated last from scene geometry and acquisition-error models; final class share can override the base class distribution.",
+    7: "Placed only on vehicle-allowed artificial-surface zones and kept separated from other vehicles.",
+}
+
+
+def infer_synthetic_label_color_map(
+    label_names: Optional[Mapping[int, str] | Mapping[str, str]],
+) -> Dict[int, Tuple[float, float, float]]:
+    if not isinstance(label_names, Mapping) or not label_names:
+        return {}
+
+    colors_by_name = {
+        normalize_field_name(name): color
+        for class_id, name in FALLBACK_SYNTHETIC_CLASS_NAMES.items()
+        for color in [FALLBACK_SYNTHETIC_CLASS_COLORS.get(class_id)]
+        if color is not None
+    }
+    inferred: Dict[int, Tuple[float, float, float]] = {}
+    for label, name in label_names.items():
+        try:
+            label_id = int(label)
+        except (TypeError, ValueError):
+            continue
+        color = colors_by_name.get(normalize_field_name(str(name)))
+        if color is None:
+            continue
+        normalized = normalize_label_color_triplet(color)
+        if normalized is None:
+            continue
+        inferred[label_id] = normalized
+    return inferred
+
+
+def normalize_synthetic_class_generation_order(
+    class_generation_order: Optional[Sequence[int]],
+    class_names: Optional[Mapping[int, str]] = None,
+) -> Tuple[int, ...]:
+    known_ids = tuple(
+        sorted(class_names)
+        if isinstance(class_names, Mapping) and class_names
+        else sorted(FALLBACK_SYNTHETIC_CLASS_NAMES)
+    )
+    fallback = tuple(
+        class_id for class_id in FALLBACK_SYNTHETIC_CLASS_GENERATION_ORDER if class_id in known_ids
+    )
+    if len(fallback) != len(known_ids):
+        fallback = known_ids
+    if not isinstance(class_generation_order, Sequence) or isinstance(
+        class_generation_order, (str, bytes, bytearray)
+    ):
+        return fallback
+    try:
+        parsed = tuple(int(class_id) for class_id in class_generation_order)
+    except (TypeError, ValueError):
+        return fallback
+    if len(parsed) != len(known_ids) or set(parsed) != set(known_ids):
+        return fallback
+    return parsed
+
+
+def normalize_synthetic_class_generation_rules(
+    class_generation_rules: Optional[Mapping[int, str] | Mapping[str, str]],
+    class_names: Optional[Mapping[int, str]] = None,
+) -> Dict[int, str]:
+    known_ids = tuple(
+        sorted(class_names)
+        if isinstance(class_names, Mapping) and class_names
+        else sorted(FALLBACK_SYNTHETIC_CLASS_NAMES)
+    )
+    source = class_generation_rules if isinstance(class_generation_rules, Mapping) else {}
+    normalized: Dict[int, str] = {}
+    for class_id in known_ids:
+        value = source.get(class_id)
+        if value is None:
+            value = source.get(str(class_id))
+        if value is None or not str(value).strip():
+            value = FALLBACK_SYNTHETIC_CLASS_GENERATION_RULES.get(
+                class_id,
+                f"Generated as class {class_id}.",
+            )
+        normalized[class_id] = str(value).strip()
+    return normalized
+
+
+def format_synthetic_class_mapping(class_names: Optional[Mapping[int, str]] = None) -> str:
+    source = class_names if isinstance(class_names, Mapping) and class_names else FALLBACK_SYNTHETIC_CLASS_NAMES
+    return ", ".join(f"{class_id}={source[class_id]}" for class_id in sorted(source))
+
+
+def format_synthetic_generation_order(
+    class_generation_order: Optional[Sequence[int]] = None,
+    class_names: Optional[Mapping[int, str]] = None,
+) -> str:
+    source = class_names if isinstance(class_names, Mapping) and class_names else FALLBACK_SYNTHETIC_CLASS_NAMES
+    order = normalize_synthetic_class_generation_order(class_generation_order, source)
+    return " -> ".join(
+        f"{class_id} ({source.get(class_id, f'Class {class_id}')})" for class_id in order
+    )
+
+
 FALLBACK_CLASS_PERCENTAGES: Tuple[float, ...] = (13.0, 38.0, 14.0, 16.0, 10.0, 4.0, 2.0, 3.0)
 FALLBACK_ARTIFICIAL_SURFACE_TYPES: Tuple[str, ...] = (
     "road_network",
@@ -2962,6 +3290,8 @@ class SyntheticGenerationDialog(QDialog):
         self,
         default_params: Optional[SyntheticGenerationParams] = None,
         class_names: Optional[Dict[int, str]] = None,
+        class_generation_order: Optional[Sequence[int]] = None,
+        class_generation_rules: Optional[Mapping[int, str] | Mapping[str, str]] = None,
         default_class_percentages: Optional[Sequence[float]] = None,
         artificial_surface_type_names: Optional[Dict[str, str]] = None,
         default_artificial_surface_type_percentages: Optional[Sequence[float]] = None,
@@ -2990,6 +3320,14 @@ class SyntheticGenerationDialog(QDialog):
         params = default_params or SyntheticGenerationParams()
         self._class_names = self._normalize_class_names(class_names)
         self._class_ids = sorted(self._class_names)
+        self._class_generation_order = normalize_synthetic_class_generation_order(
+            class_generation_order,
+            self._class_names,
+        )
+        self._class_generation_rules = normalize_synthetic_class_generation_rules(
+            class_generation_rules,
+            self._class_names,
+        )
         fallback_percentages = self._normalize_percentages(
             values=default_class_percentages,
             class_count=len(self._class_ids),
@@ -3244,6 +3582,11 @@ class SyntheticGenerationDialog(QDialog):
             spin.setSingleStep(0.5)
             spin.setSuffix(" %")
             spin.setValue(float(initial_percentages[idx]))
+            tooltip = self._class_generation_rules.get(class_id)
+            if tooltip:
+                spin.setToolTip(
+                    f"Class {class_id} ({self._class_names[class_id]}). {tooltip}"
+                )
             spin.valueChanged.connect(self._update_class_distribution_summary)
             self.class_percentage_spins[class_id] = spin
 
@@ -3812,9 +4155,16 @@ class SyntheticGenerationDialog(QDialog):
         low_veg_layout.addStretch(1)
         tabs.addTab(low_veg_tab, "Low Vegetation")
 
+        label_mapping_note = format_synthetic_class_mapping(self._class_names)
+        generation_order_note = format_synthetic_generation_order(
+            self._class_generation_order,
+            self._class_names,
+        )
         note = QLabel(
             (
-                "Generation uses utils/synthetic_labeled_point_cloud.py pipeline. "
+                f"Label mapping: {label_mapping_note}\n"
+                f"Generation order: {generation_order_note}\n"
+                "Hover class percentage controls for class-specific placement rules and overlap limits. "
                 "When custom distributions are enabled, percentages must sum to 100%. "
                 "Artifact point fraction controls the final share of class 6."
             ),
@@ -5154,10 +5504,12 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: ProjectSettings, parent=None):
         super().__init__(parent)
         accepted_tin_visual = project_tin_visual_settings(settings)
+        accepted_label_colors = normalize_project_label_color_settings(getattr(settings, "label_colors", {}))
         self._accepted_settings = ProjectSettings(
             output_directory=str(settings.output_directory).strip() or "data",
             point_size=_clamp_point_size(settings.point_size),
             viewport_background=normalize_color_value(settings.viewport_background),
+            label_colors=accepted_label_colors,
             bounding_box_color_mode=_normalize_bounding_box_color_mode(settings.bounding_box_color_mode),
             bounding_box_color=normalize_color_value(settings.bounding_box_color),
             bounding_box_line_width=_clamp_bounding_box_line_width(settings.bounding_box_line_width),
@@ -5166,9 +5518,10 @@ class SettingsDialog(QDialog):
             tin_elevation_colormap=accepted_tin_visual.elevation_colormap,
             tin_smooth_normals=accepted_tin_visual.smooth_normals,
         )
+        self._label_color_rows: Dict[int, Dict[str, object]] = {}
 
         self.setWindowTitle("Project Settings")
-        self.resize(640, 0)
+        self.resize(980, 720)
 
         self.tabs = QTabWidget(self)
 
@@ -5231,6 +5584,60 @@ class SettingsDialog(QDialog):
         general_layout.setContentsMargins(0, 0, 0, 0)
         general_layout.addLayout(general_form)
         general_layout.addStretch(1)
+
+        label_colors_tab = QWidget(self)
+        label_colors_layout = QVBoxLayout(label_colors_tab)
+        label_colors_layout.setContentsMargins(0, 0, 0, 0)
+
+        label_colors_help_label = QLabel(
+            (
+                "These colors are used in Label mode. For each label you can choose a preset, "
+                "type a color as #RRGGBB / rgb(r,g,b) / r,g,b, edit RGB levels directly, or open the color picker. "
+                "Labels 0-20 are listed by default, and you can add extra label values below when needed."
+            ),
+            label_colors_tab,
+        )
+        label_colors_help_label.setWordWrap(True)
+        label_colors_help_label.setStyleSheet("color: #5a6777;")
+
+        add_label_row = QWidget(label_colors_tab)
+        add_label_layout = QHBoxLayout(add_label_row)
+        add_label_layout.setContentsMargins(0, 0, 0, 0)
+        add_label_layout.addWidget(QLabel("Extra label value:", add_label_row))
+        self.add_label_color_spin = QSpinBox(add_label_row)
+        self.add_label_color_spin.setRange(-999999, 999999)
+        self.add_label_color_spin.setValue(21)
+        self.add_label_color_spin.setToolTip("Add a label row outside the default 0-20 range.")
+        add_label_button = QPushButton("Add Label", add_label_row)
+        add_label_button.clicked.connect(self._add_custom_label_color_row)
+        add_label_layout.addWidget(self.add_label_color_spin)
+        add_label_layout.addWidget(add_label_button)
+        add_label_layout.addStretch(1)
+
+        self.label_color_rows_container = QWidget(label_colors_tab)
+        self.label_color_rows_layout = QVBoxLayout(self.label_color_rows_container)
+        self.label_color_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.label_color_rows_layout.setSpacing(6)
+
+        label_colors_scroll = QScrollArea(label_colors_tab)
+        label_colors_scroll.setWidgetResizable(True)
+        label_colors_scroll.setWidget(self.label_color_rows_container)
+
+        label_colors_layout.addWidget(label_colors_help_label)
+        label_colors_layout.addWidget(add_label_row)
+        label_colors_layout.addWidget(label_colors_scroll, 1)
+
+        initial_label_ids = list(DEFAULT_LABEL_COLOR_LABEL_IDS)
+        initial_label_ids.extend(
+            label_id
+            for label_id in sorted(self._accepted_settings.label_colors)
+            if label_id not in DEFAULT_LABEL_COLOR_LABEL_IDS
+        )
+        for label_id in initial_label_ids:
+            self._add_label_color_row(
+                label_id,
+                self._accepted_settings.label_colors.get(label_id, self._default_label_color_value(label_id)),
+            )
 
         self.bounding_box_color_mode_combo = QComboBox(self)
         self.bounding_box_color_mode_combo.addItem("Random per box", "random")
@@ -5338,9 +5745,10 @@ class SettingsDialog(QDialog):
         tin_display_layout.addLayout(tin_display_form)
         tin_display_layout.addStretch(1)
 
-        self.tabs.addTab(general_tab, "General")
-        self.tabs.addTab(bounding_box_tab, "Bounding Boxes")
-        self.tabs.addTab(tin_display_tab, "Mesh Display")
+        self._general_tab_index = self.tabs.addTab(general_tab, "General")
+        self._label_colors_tab_index = self.tabs.addTab(label_colors_tab, "Label colors")
+        self._bounding_box_tab_index = self.tabs.addTab(bounding_box_tab, "Bounding Boxes")
+        self._mesh_display_tab_index = self.tabs.addTab(tin_display_tab, "Mesh Display")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
@@ -5365,6 +5773,7 @@ class SettingsDialog(QDialog):
             output_directory=self._accepted_settings.output_directory,
             point_size=self._accepted_settings.point_size,
             viewport_background=self._accepted_settings.viewport_background,
+            label_colors=dict(self._accepted_settings.label_colors),
             bounding_box_color_mode=self._accepted_settings.bounding_box_color_mode,
             bounding_box_color=self._accepted_settings.bounding_box_color,
             bounding_box_line_width=self._accepted_settings.bounding_box_line_width,
@@ -5373,6 +5782,144 @@ class SettingsDialog(QDialog):
             tin_elevation_colormap=self._accepted_settings.tin_elevation_colormap,
             tin_smooth_normals=self._accepted_settings.tin_smooth_normals,
         )
+
+    def _default_label_color_value(self, label_id: int) -> str:
+        default_color = FALLBACK_SYNTHETIC_CLASS_COLORS.get(int(label_id))
+        if default_color is not None:
+            return color_to_hex(default_color)
+        return color_to_hex(stable_label_color(int(label_id)))
+
+    def _label_color_caption(self, label_id: int) -> str:
+        label_name = FALLBACK_SYNTHETIC_CLASS_NAMES.get(int(label_id))
+        if label_name:
+            return f"{int(label_id)} - {label_name}"
+        return f"{int(label_id)}"
+
+    def _add_label_color_row(self, label_id: int, color_value: object) -> None:
+        label_id = int(label_id)
+        if label_id in self._label_color_rows:
+            edit = self._label_color_rows[label_id]["edit"]
+            if isinstance(edit, QLineEdit):
+                edit.setFocus()
+                edit.selectAll()
+            return
+
+        row_widget = QWidget(self.label_color_rows_container)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        caption_label = QLabel(self._label_color_caption(label_id), row_widget)
+        caption_label.setMinimumWidth(160)
+
+        preset_combo = QComboBox(row_widget)
+        preset_combo.addItem("Custom", "")
+        for preset_label, preset_color in LABEL_COLOR_PRESETS:
+            preset_combo.addItem(preset_label, preset_color)
+
+        color_edit = QLineEdit(row_widget)
+        color_edit.setPlaceholderText("#RRGGBB, rgb(r,g,b), or r,g,b")
+        color_edit.setMinimumWidth(170)
+
+        red_spin = QSpinBox(row_widget)
+        red_spin.setRange(0, 255)
+        red_spin.setPrefix("R ")
+        red_spin.setToolTip("Red channel (0-255)")
+
+        green_spin = QSpinBox(row_widget)
+        green_spin.setRange(0, 255)
+        green_spin.setPrefix("G ")
+        green_spin.setToolTip("Green channel (0-255)")
+
+        blue_spin = QSpinBox(row_widget)
+        blue_spin.setRange(0, 255)
+        blue_spin.setPrefix("B ")
+        blue_spin.setToolTip("Blue channel (0-255)")
+
+        preview = QLabel(row_widget)
+        preview.setFixedSize(56, 24)
+
+        pick_button = QPushButton("Pick Color...", row_widget)
+        remove_button = QPushButton("Remove", row_widget)
+        remove_button.setVisible(label_id not in DEFAULT_LABEL_COLOR_LABEL_IDS)
+
+        row_layout.addWidget(caption_label)
+        row_layout.addWidget(preset_combo)
+        row_layout.addWidget(color_edit, 1)
+        row_layout.addWidget(red_spin)
+        row_layout.addWidget(green_spin)
+        row_layout.addWidget(blue_spin)
+        row_layout.addWidget(preview)
+        row_layout.addWidget(pick_button)
+        row_layout.addWidget(remove_button)
+
+        self._label_color_rows[label_id] = {
+            "widget": row_widget,
+            "preset": preset_combo,
+            "edit": color_edit,
+            "red": red_spin,
+            "green": green_spin,
+            "blue": blue_spin,
+            "preview": preview,
+            "pick": pick_button,
+            "remove": remove_button,
+        }
+
+        preset_combo.currentIndexChanged.connect(
+            lambda _index, current_label=label_id: self._apply_selected_label_color_preset(current_label)
+        )
+        color_edit.textChanged.connect(
+            lambda _text, current_label=label_id: self._update_label_color_row_preview(current_label)
+        )
+        red_spin.valueChanged.connect(
+            lambda _value, current_label=label_id: self._update_label_color_from_rgb(current_label)
+        )
+        green_spin.valueChanged.connect(
+            lambda _value, current_label=label_id: self._update_label_color_from_rgb(current_label)
+        )
+        blue_spin.valueChanged.connect(
+            lambda _value, current_label=label_id: self._update_label_color_from_rgb(current_label)
+        )
+        pick_button.clicked.connect(
+            lambda _checked=False, current_label=label_id: self._choose_label_color(current_label)
+        )
+        remove_button.clicked.connect(
+            lambda _checked=False, current_label=label_id: self._remove_label_color_row(current_label)
+        )
+
+        try:
+            initial_color = normalize_color_value(color_value)
+        except ValueError:
+            initial_color = self._default_label_color_value(label_id)
+        color_edit.setText(initial_color)
+        self.label_color_rows_layout.addWidget(row_widget)
+
+    def _remove_label_color_row(self, label_id: int) -> None:
+        if int(label_id) in DEFAULT_LABEL_COLOR_LABEL_IDS:
+            return
+        row = self._label_color_rows.pop(int(label_id), None)
+        if row is None:
+            return
+        widget = row.get("widget")
+        if isinstance(widget, QWidget):
+            widget.setParent(None)
+            widget.deleteLater()
+
+    def _add_custom_label_color_row(self) -> None:
+        label_id = int(self.add_label_color_spin.value())
+        if label_id in self._label_color_rows:
+            edit = self._label_color_rows[label_id].get("edit")
+            if isinstance(edit, QLineEdit):
+                edit.setFocus()
+                edit.selectAll()
+            return
+        self._add_label_color_row(label_id, self._default_label_color_value(label_id))
+        self.add_label_color_spin.setValue(label_id + 1)
+
+    def _apply_selected_background_preset(self, _index: int) -> None:
+        preset_value = self.background_preset_combo.currentData()
+        if preset_value:
+            self.background_edit.setText(str(preset_value))
 
     def _browse_output_directory(self) -> None:
         start_dir = resolve_output_directory(self.output_dir_edit.text())
@@ -5383,11 +5930,6 @@ class SettingsDialog(QDialog):
         )
         if selected:
             self.output_dir_edit.setText(display_output_directory(Path(selected)))
-
-    def _apply_selected_background_preset(self, _index: int) -> None:
-        preset_value = self.background_preset_combo.currentData()
-        if preset_value:
-            self.background_edit.setText(str(preset_value))
 
     def _choose_background_color(self) -> None:
         initial = QColor(self.background_edit.text().strip())
@@ -5431,6 +5973,115 @@ class SettingsDialog(QDialog):
         )
         self.background_edit.setStyleSheet("")
         self._sync_background_preset_selection(normalized)
+
+    def _apply_selected_label_color_preset(self, label_id: int) -> None:
+        row = self._label_color_rows.get(int(label_id))
+        if row is None:
+            return
+        preset_combo = row.get("preset")
+        color_edit = row.get("edit")
+        if not isinstance(preset_combo, QComboBox) or not isinstance(color_edit, QLineEdit):
+            return
+        preset_value = preset_combo.currentData()
+        if preset_value:
+            color_edit.setText(str(preset_value))
+
+    def _choose_label_color(self, label_id: int) -> None:
+        row = self._label_color_rows.get(int(label_id))
+        if row is None:
+            return
+        color_edit = row.get("edit")
+        if not isinstance(color_edit, QLineEdit):
+            return
+
+        initial = QColor(color_edit.text().strip())
+        if not initial.isValid():
+            try:
+                initial = QColor(normalize_color_value(color_edit.text()))
+            except ValueError:
+                initial = QColor(self._default_label_color_value(int(label_id)))
+
+        selected = QColorDialog.getColor(initial, self, f"Select Label {int(label_id)} Color")
+        if selected.isValid():
+            color_edit.setText(selected.name().upper())
+
+    def _sync_label_color_preset_selection(self, label_id: int, color_value: str) -> None:
+        row = self._label_color_rows.get(int(label_id))
+        if row is None:
+            return
+        preset_combo = row.get("preset")
+        if not isinstance(preset_combo, QComboBox):
+            return
+
+        normalized = normalize_color_value(color_value)
+        target_index = 0
+        for index in range(1, preset_combo.count()):
+            if str(preset_combo.itemData(index)).upper() == normalized:
+                target_index = index
+                break
+        preset_combo.blockSignals(True)
+        preset_combo.setCurrentIndex(target_index)
+        preset_combo.blockSignals(False)
+
+    def _update_label_color_row_preview(self, label_id: int) -> None:
+        row = self._label_color_rows.get(int(label_id))
+        if row is None:
+            return
+        color_edit = row.get("edit")
+        preview = row.get("preview")
+        red_spin = row.get("red")
+        green_spin = row.get("green")
+        blue_spin = row.get("blue")
+        if not isinstance(color_edit, QLineEdit) or not isinstance(preview, QLabel):
+            return
+        if not all(isinstance(spin, QSpinBox) for spin in (red_spin, green_spin, blue_spin)):
+            return
+
+        text = color_edit.text().strip()
+        try:
+            normalized = normalize_color_value(text)
+        except ValueError:
+            preview.setStyleSheet("border: 1px solid #C44A4A; background-color: #F4D7D7;")
+            color_edit.setStyleSheet("border: 1px solid #C44A4A;")
+            preset_combo = row.get("preset")
+            if isinstance(preset_combo, QComboBox):
+                preset_combo.blockSignals(True)
+                preset_combo.setCurrentIndex(0)
+                preset_combo.blockSignals(False)
+            return
+
+        preview.setStyleSheet(f"border: 1px solid #768397; background-color: {normalized};")
+        color_edit.setStyleSheet("")
+        self._sync_label_color_preset_selection(int(label_id), normalized)
+
+        rgb_values = np.rint(np.asarray(parse_color_value(normalized), dtype=np.float64) * 255.0).astype(np.int32)
+        for spin, channel_value in zip((red_spin, green_spin, blue_spin), rgb_values):
+            spin.blockSignals(True)
+            spin.setValue(int(channel_value))
+            spin.blockSignals(False)
+
+    def _update_label_color_from_rgb(self, label_id: int) -> None:
+        row = self._label_color_rows.get(int(label_id))
+        if row is None:
+            return
+        color_edit = row.get("edit")
+        red_spin = row.get("red")
+        green_spin = row.get("green")
+        blue_spin = row.get("blue")
+        if not isinstance(color_edit, QLineEdit):
+            return
+        if not all(isinstance(spin, QSpinBox) for spin in (red_spin, green_spin, blue_spin)):
+            return
+
+        rgb = np.asarray(
+            [red_spin.value(), green_spin.value(), blue_spin.value()],
+            dtype=np.float64,
+        ) / 255.0
+        normalized = color_to_hex(rgb)
+        if color_edit.text().strip().upper() == normalized:
+            self._update_label_color_row_preview(int(label_id))
+            return
+        color_edit.setText(normalized)
 
     def _selected_bounding_box_color_mode(self) -> str:
         return _normalize_bounding_box_color_mode(self.bounding_box_color_mode_combo.currentData())
@@ -5504,7 +6155,7 @@ class SettingsDialog(QDialog):
     def accept(self) -> None:
         output_directory = self.output_dir_edit.text().strip()
         if not output_directory:
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentIndex(self._general_tab_index)
             QMessageBox.warning(self, "Invalid Settings", "Output directory must not be empty.")
             return
 
@@ -5512,7 +6163,7 @@ class SettingsDialog(QDialog):
             resolved_output_dir = resolve_output_directory(output_directory)
             resolved_output_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:  # noqa: BLE001
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentIndex(self._general_tab_index)
             QMessageBox.warning(
                 self,
                 "Invalid Settings",
@@ -5523,16 +6174,30 @@ class SettingsDialog(QDialog):
         try:
             normalized_background = normalize_color_value(self.background_edit.text())
         except ValueError as exc:
-            self.tabs.setCurrentIndex(0)
+            self.tabs.setCurrentIndex(self._general_tab_index)
             QMessageBox.warning(self, "Invalid Settings", f"Invalid viewport background color:\n{exc}")
             return
+
+        normalized_label_colors: Dict[int, str] = {}
+        for label_id in sorted(self._label_color_rows):
+            color_edit = self._label_color_rows[label_id].get("edit")
+            if not isinstance(color_edit, QLineEdit):
+                continue
+            try:
+                normalized_label_colors[int(label_id)] = normalize_color_value(color_edit.text())
+            except ValueError as exc:
+                self.tabs.setCurrentIndex(self._label_colors_tab_index)
+                color_edit.setFocus()
+                color_edit.selectAll()
+                QMessageBox.warning(self, "Invalid Settings", f"Invalid color for label {int(label_id)}:\n{exc}")
+                return
 
         try:
             normalized_bounding_box_color = normalize_color_value(
                 self.bounding_box_color_edit.text() or self._accepted_settings.bounding_box_color
             )
         except ValueError as exc:
-            self.tabs.setCurrentIndex(1)
+            self.tabs.setCurrentIndex(self._bounding_box_tab_index)
             QMessageBox.warning(self, "Invalid Settings", f"Invalid bounding box color:\n{exc}")
             return
 
@@ -5543,7 +6208,7 @@ class SettingsDialog(QDialog):
                 smooth_normals=self.tin_smooth_normals_check.isChecked(),
             )
         except ValueError as exc:
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(self._mesh_display_tab_index)
             QMessageBox.warning(self, "Invalid Settings", f"Invalid mesh display settings:\n{exc}")
             return
 
@@ -5551,6 +6216,7 @@ class SettingsDialog(QDialog):
             output_directory=display_output_directory(resolved_output_dir),
             point_size=float(self.point_size_spin.value()),
             viewport_background=normalized_background,
+            label_colors=normalize_project_label_color_settings(normalized_label_colors),
             bounding_box_color_mode=self._selected_bounding_box_color_mode(),
             bounding_box_color=normalized_bounding_box_color,
             bounding_box_line_width=_clamp_bounding_box_line_width(self.bounding_box_line_width_spin.value()),
@@ -5585,6 +6251,7 @@ class PointCloudGLWidget(QOpenGLWidget):
         self._color_mode: str = "neutral"
         self._background = parse_color_value(APP_SETTINGS.viewport_background)
         self._neutral_color = np.array([0.82, 0.84, 0.88], dtype=np.float32)
+        self._label_display_color_map = normalize_label_color_mapping(APP_SETTINGS.label_colors)
         self._cluster_box_color_mode = _normalize_bounding_box_color_mode(
             APP_SETTINGS.bounding_box_color_mode
         )
@@ -5680,6 +6347,20 @@ class PointCloudGLWidget(QOpenGLWidget):
 
     def set_background_color(self, color: Sequence[float]) -> None:
         self._background = parse_color_value(color)
+        self.update()
+
+    def set_label_display_colors(
+        self,
+        label_colors: Optional[Mapping[int, Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+    ) -> None:
+        normalized = normalize_label_color_mapping(label_colors)
+        if normalized == self._label_display_color_map:
+            return
+        self._label_display_color_map = normalized
+        if self._cloud is not None:
+            self._cloud.clear_label_color_cache()
+        if self._initialized and self._cloud is not None and self._color_mode == "label":
+            self._upload_colors()
         self.update()
 
     def set_cluster_box_display_settings(
@@ -6561,7 +7242,7 @@ class PointCloudGLWidget(QOpenGLWidget):
             assert self._cloud.rgb is not None
             return np.ascontiguousarray(self._cloud.rgb, dtype=np.float32)
         if self._color_mode == "label" and self._cloud.has_labels:
-            return self._cloud.label_colors()
+            return self._cloud.label_colors(preferred_colors=self._label_display_color_map)
         return np.tile(self._neutral_color, (self._cloud.loaded_count, 1)).astype(np.float32, copy=False)
 
     def _upload_geometry(self) -> None:
@@ -6731,6 +7412,7 @@ class MainWindow(QMainWindow):
             output_directory=APP_SETTINGS.output_directory,
             point_size=APP_SETTINGS.point_size,
             viewport_background=APP_SETTINGS.viewport_background,
+            label_colors=dict(APP_SETTINGS.label_colors),
             bounding_box_color_mode=APP_SETTINGS.bounding_box_color_mode,
             bounding_box_color=APP_SETTINGS.bounding_box_color,
             bounding_box_line_width=APP_SETTINGS.bounding_box_line_width,
@@ -7119,6 +7801,7 @@ class MainWindow(QMainWindow):
             output_directory=display_output_directory(resolve_output_directory(settings.output_directory)),
             point_size=_clamp_point_size(settings.point_size),
             viewport_background=normalize_color_value(settings.viewport_background),
+            label_colors=normalize_project_label_color_settings(settings.label_colors),
             bounding_box_color_mode=_normalize_bounding_box_color_mode(settings.bounding_box_color_mode),
             bounding_box_color=normalize_color_value(settings.bounding_box_color),
             bounding_box_line_width=_clamp_bounding_box_line_width(settings.bounding_box_line_width),
@@ -7132,6 +7815,7 @@ class MainWindow(QMainWindow):
         APP_SETTINGS.output_directory = normalized.output_directory
         APP_SETTINGS.point_size = normalized.point_size
         APP_SETTINGS.viewport_background = normalized.viewport_background
+        APP_SETTINGS.label_colors = dict(normalized.label_colors)
         APP_SETTINGS.bounding_box_color_mode = normalized.bounding_box_color_mode
         APP_SETTINGS.bounding_box_color = normalized.bounding_box_color
         APP_SETTINGS.bounding_box_line_width = normalized.bounding_box_line_width
@@ -7152,6 +7836,7 @@ class MainWindow(QMainWindow):
 
         self.gl_widget.set_point_size(normalized.point_size)
         self.gl_widget.set_background_color(parse_color_value(normalized.viewport_background))
+        self.gl_widget.set_label_display_colors(normalized.label_colors)
         self.gl_widget.set_cluster_box_display_settings(
             color_mode=normalized.bounding_box_color_mode,
             color=normalized.bounding_box_color,
@@ -7782,6 +8467,8 @@ class MainWindow(QMainWindow):
             return
 
         class_names = getattr(synthetic_module, "CLASS_NAMES", None)
+        class_generation_order = getattr(synthetic_module, "CLASS_GENERATION_ORDER", None)
+        class_generation_rules = getattr(synthetic_module, "CLASS_GENERATION_RULES", None)
         default_class_percentages = getattr(synthetic_module, "DEFAULT_CLASS_PERCENTAGES", None)
         if default_class_percentages is None:
             default_class_ratios = getattr(synthetic_module, "DEFAULT_CLASS_RATIOS", None)
@@ -7894,6 +8581,14 @@ class MainWindow(QMainWindow):
         dialog = SyntheticGenerationDialog(
             default_params=self._last_generation_params,
             class_names=class_names if isinstance(class_names, dict) else None,
+            class_generation_order=(
+                class_generation_order
+                if isinstance(class_generation_order, (list, tuple))
+                else None
+            ),
+            class_generation_rules=(
+                class_generation_rules if isinstance(class_generation_rules, Mapping) else None
+            ),
             default_class_percentages=default_class_percentages,
             artificial_surface_type_names=(
                 artificial_surface_type_names
@@ -8248,36 +8943,35 @@ class MainWindow(QMainWindow):
             f"synthetic_seed_{params.seed}_"
             f"n_{int(points.shape[0])}.generated"
         )
+        class_names = getattr(synthetic_module, "CLASS_NAMES", None)
+        label_names = (
+            {
+                int(class_id): str(name)
+                for class_id, name in class_names.items()
+                if str(name).strip()
+            }
+            if isinstance(class_names, Mapping)
+            else {}
+        )
+        class_colors = getattr(synthetic_module, "CLASS_COLORS", None)
+        label_color_map = normalize_label_color_mapping(class_colors)
         return PointCloudData(
             points=points,
             labels=labels,
             rgb=rgb,
             file_path=file_name,
             original_count=int(points.shape[0]),
+            label_names=label_names,
+            label_color_map=label_color_map,
         )
 
     def _build_generated_rgb(self, labels: np.ndarray, synthetic_module) -> Optional[np.ndarray]:
-        class_colors = getattr(synthetic_module, "CLASS_COLORS", None)
-        if not isinstance(class_colors, dict):
-            return None
-
         unique_labels = np.unique(labels)
         if unique_labels.size == 0:
             return None
 
-        fallback = generate_distinct_palette(int(unique_labels.size))
-        label_to_color: Dict[int, np.ndarray] = {}
-        for idx, label in enumerate(unique_labels):
-            value = class_colors.get(int(label))
-            if value is None:
-                label_to_color[int(label)] = fallback[idx]
-                continue
-
-            color = np.asarray(value, dtype=np.float32).reshape(-1)
-            if color.size != 3:
-                label_to_color[int(label)] = fallback[idx]
-                continue
-            label_to_color[int(label)] = np.clip(color[:3], 0.0, 1.0)
+        class_colors = normalize_label_color_mapping(getattr(synthetic_module, "CLASS_COLORS", None))
+        label_to_color = build_unique_label_color_map(unique_labels, preferred_colors=class_colors)
 
         rgb = np.empty((labels.shape[0], 3), dtype=np.float32)
         for label, color in label_to_color.items():

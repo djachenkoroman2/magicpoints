@@ -75,6 +75,8 @@ ARTIFICIAL_SURFACE_CLASS_ID = 0
 NATURAL_SURFACE_CLASS_ID = 1
 HIGH_VEGETATION_CLASS_ID = 2
 LOW_VEGETATION_CLASS_ID = 3
+BUILDINGS_CLASS_ID = 4
+STRUCTURES_CLASS_ID = 5
 ARTIFACTS_CLASS_ID = 6
 VEHICLES_CLASS_ID = 7
 
@@ -84,8 +86,8 @@ CLASS_NAMES: Dict[int, str] = {
     NATURAL_SURFACE_CLASS_ID: "Natural surface",
     HIGH_VEGETATION_CLASS_ID: "High vegetation",
     LOW_VEGETATION_CLASS_ID: "Low vegetation",
-    4: "Buildings",
-    5: "Structures",
+    BUILDINGS_CLASS_ID: "Buildings",
+    STRUCTURES_CLASS_ID: "Structures",
     ARTIFACTS_CLASS_ID: "Artifacts",
     VEHICLES_CLASS_ID: "Vehicles",
 }
@@ -95,8 +97,8 @@ CLASS_COLORS: Dict[int, Tuple[float, float, float]] = {
     NATURAL_SURFACE_CLASS_ID: (0.55, 0.39, 0.22),  # brown
     HIGH_VEGETATION_CLASS_ID: (0.05, 0.45, 0.12),  # dark green
     LOW_VEGETATION_CLASS_ID: (0.35, 0.75, 0.30),  # light green
-    4: (0.82, 0.22, 0.18),  # red
-    5: (0.85, 0.68, 0.20),  # yellow
+    BUILDINGS_CLASS_ID: (0.82, 0.22, 0.18),  # red
+    STRUCTURES_CLASS_ID: (0.85, 0.68, 0.20),  # yellow
     ARTIFACTS_CLASS_ID: (0.68, 0.18, 0.72),  # magenta
     VEHICLES_CLASS_ID: (0.15, 0.40, 0.85),  # blue
 }
@@ -107,14 +109,76 @@ DEFAULT_CLASS_RATIOS: Dict[int, float] = {
     NATURAL_SURFACE_CLASS_ID: 0.38,
     HIGH_VEGETATION_CLASS_ID: 0.14,
     LOW_VEGETATION_CLASS_ID: 0.16,
-    4: 0.10,
-    5: 0.04,
+    BUILDINGS_CLASS_ID: 0.10,
+    STRUCTURES_CLASS_ID: 0.04,
     ARTIFACTS_CLASS_ID: 0.02,
     VEHICLES_CLASS_ID: 0.03,
 }
 DEFAULT_CLASS_PERCENTAGES: Tuple[float, ...] = tuple(
     DEFAULT_CLASS_RATIOS[class_id] * 100.0 for class_id in CLASS_IDS
 )
+
+CLASS_LABELS_CONFIG_KEY = "class_labels"
+CLASS_GENERATION_ORDER_CONFIG_KEY = "class_generation_order"
+PLY_LABEL_COMMENT_PREFIX = "magicpoints.class_label"
+PLY_GENERATION_ORDER_COMMENT_PREFIX = "magicpoints.class_generation_order"
+
+CLASS_GENERATION_ORDER: Tuple[int, ...] = (
+    BUILDINGS_CLASS_ID,
+    ARTIFICIAL_SURFACE_CLASS_ID,
+    HIGH_VEGETATION_CLASS_ID,
+    STRUCTURES_CLASS_ID,
+    VEHICLES_CLASS_ID,
+    LOW_VEGETATION_CLASS_ID,
+    ARTIFACTS_CLASS_ID,
+    NATURAL_SURFACE_CLASS_ID,
+)
+
+CLASS_GENERATION_RULES: Dict[int, str] = {
+    ARTIFICIAL_SURFACE_CLASS_ID: (
+        "Sampled only inside generated artificial-surface zones; natural-surface sampling is masked out there."
+    ),
+    NATURAL_SURFACE_CLASS_ID: (
+        "Sampled after object placement and only outside artificial-surface zones."
+    ),
+    HIGH_VEGETATION_CLASS_ID: (
+        "Trees are placed outside artificial-surface zones and away from building footprints."
+    ),
+    LOW_VEGETATION_CLASS_ID: (
+        "Shrubs and grass patches avoid artificial-surface zones and building footprints."
+    ),
+    BUILDINGS_CLASS_ID: (
+        "Placed before artificial-surface point sampling to anchor sidewalks/front areas; footprints avoid detached artificial surfaces and other buildings."
+    ),
+    STRUCTURES_CLASS_ID: (
+        "Placed after buildings and vegetation; footprints avoid building footprints."
+    ),
+    ARTIFACTS_CLASS_ID: (
+        "Generated last from scene geometry and acquisition-error models; final class share can override the base class distribution."
+    ),
+    VEHICLES_CLASS_ID: (
+        "Placed only on vehicle-allowed artificial-surface zones and kept separated from other vehicles."
+    ),
+}
+
+
+def format_class_label_mapping(class_names: Mapping[int, str] | None = None) -> str:
+    source = class_names if isinstance(class_names, Mapping) else CLASS_NAMES
+    return ", ".join(
+        f"{class_id}={source.get(class_id, CLASS_NAMES[class_id])}" for class_id in CLASS_IDS
+    )
+
+
+def format_class_generation_order(
+    order: Sequence[int] | None = None,
+    class_names: Mapping[int, str] | None = None,
+) -> str:
+    source = class_names if isinstance(class_names, Mapping) else CLASS_NAMES
+    effective_order = tuple(int(class_id) for class_id in (order or CLASS_GENERATION_ORDER))
+    return " -> ".join(
+        f"{class_id} ({source.get(class_id, CLASS_NAMES.get(class_id, f'Class {class_id}'))})"
+        for class_id in effective_order
+    )
 
 ARTIFICIAL_SURFACE_TYPES: Tuple[str, ...] = (
     "road_network",
@@ -630,6 +694,59 @@ def _parse_class_id_key(raw_key: Any, name: str) -> int:
     return class_id
 
 
+def _validate_class_labels_metadata(value: Any, name: str = CLASS_LABELS_CONFIG_KEY) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise ValueError(f"`{name}` must be a mapping.")
+
+    parsed: Dict[int, str] = {}
+    for raw_key, raw_value in value.items():
+        class_id = _parse_class_id_key(raw_key, name)
+        label = str(raw_value).strip()
+        if not label:
+            raise ValueError(f"`{name}[{raw_key!r}]` must be a non-empty string.")
+        parsed[class_id] = label
+
+    missing_ids = [class_id for class_id in CLASS_IDS if class_id not in parsed]
+    if missing_ids:
+        raise ValueError(
+            f"`{name}` must provide labels for every class id. Missing ids: {missing_ids}."
+        )
+
+    mismatched = {
+        class_id: (parsed[class_id], CLASS_NAMES[class_id])
+        for class_id in CLASS_IDS
+        if parsed[class_id] != CLASS_NAMES[class_id]
+    }
+    if mismatched:
+        details = ", ".join(
+            f"{class_id}: expected '{expected}', got '{actual}'"
+            for class_id, (actual, expected) in mismatched.items()
+        )
+        raise ValueError(f"`{name}` does not match the current class label mapping: {details}.")
+
+
+def _validate_class_generation_order_metadata(
+    value: Any,
+    name: str = CLASS_GENERATION_ORDER_CONFIG_KEY,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, SequenceABC) or isinstance(value, (str, bytes, bytearray)):
+        raise ValueError(f"`{name}` must be a YAML sequence.")
+
+    parsed = tuple(_parse_class_id_key(raw_value, name) for raw_value in value)
+    if len(parsed) != len(CLASS_GENERATION_ORDER):
+        raise ValueError(
+            f"`{name}` must contain exactly {len(CLASS_GENERATION_ORDER)} class ids, got {len(parsed)}."
+        )
+    if parsed != CLASS_GENERATION_ORDER:
+        raise ValueError(
+            f"`{name}` must match the current generation order {list(CLASS_GENERATION_ORDER)}, got {list(parsed)}."
+        )
+
+
 def _parse_choice_key(raw_key: Any, name: str, allowed_keys: Sequence[str]) -> str:
     key = str(raw_key).strip().lower()
     if key not in allowed_keys:
@@ -818,7 +935,12 @@ def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
         )
 
     defaults = default_generation_config()
-    allowed_keys = set(defaults) | {"schema", "artifacts"}
+    allowed_keys = set(defaults) | {
+        "schema",
+        "artifacts",
+        CLASS_LABELS_CONFIG_KEY,
+        CLASS_GENERATION_ORDER_CONFIG_KEY,
+    }
     unknown_keys = sorted(set(config) - allowed_keys)
     if unknown_keys:
         raise ValueError(f"Unknown generation config fields: {unknown_keys}.")
@@ -834,6 +956,9 @@ def validate_generation_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     artifact_types_section = artifacts_section.get("types")
     if artifact_types_section is not None and not isinstance(artifact_types_section, Mapping):
         raise ValueError("`artifacts.types` must be a mapping.")
+
+    _validate_class_labels_metadata(config.get(CLASS_LABELS_CONFIG_KEY))
+    _validate_class_generation_order_metadata(config.get(CLASS_GENERATION_ORDER_CONFIG_KEY))
 
     normalized: Dict[str, Any] = {}
     normalized["total_points"] = _coerce_int(
@@ -1208,6 +1333,12 @@ def generation_config_to_yaml_data(config: Mapping[str, Any]) -> Dict[str, Any]:
     """Convert normalized generation settings into a readable YAML payload."""
     validated = validate_generation_config(config)
     yaml_data: Dict[str, Any] = {"schema": GENERATION_CONFIG_SCHEMA}
+    yaml_data[CLASS_LABELS_CONFIG_KEY] = {
+        str(class_id): CLASS_NAMES[class_id] for class_id in CLASS_IDS
+    }
+    yaml_data[CLASS_GENERATION_ORDER_CONFIG_KEY] = [
+        int(class_id) for class_id in CLASS_GENERATION_ORDER
+    ]
     artifact_settings = _copy_artifact_type_settings(validated["artifact_type_settings"])
     for key, value in validated.items():
         if key == "class_percentages":
@@ -2428,7 +2559,7 @@ def _generate_building_points(
     y = cy + y_rot + rng.normal(0.0, 0.012, size=n_points)
     z = base_z + z_local + rng.normal(0.0, 0.016, size=n_points)
     z = np.maximum(z, base_z + 0.01)
-    labels = np.full(n_points, 4, dtype=np.int32)
+    labels = np.full(n_points, BUILDINGS_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -2777,7 +2908,7 @@ def _generate_fence_points(
     x = np.concatenate([x_rail, x_post])
     y = np.concatenate([y_rail, y_post])
     z = np.concatenate([z_rail, z_post])
-    labels = np.full(x.size, 5, dtype=np.int32)
+    labels = np.full(x.size, STRUCTURES_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -2829,7 +2960,7 @@ def _generate_support_points(
     x = np.concatenate([x_pole, x_beam])
     y = np.concatenate([y_pole, y_beam])
     z = np.concatenate([z_pole, z_beam])
-    labels = np.full(x.size, 5, dtype=np.int32)
+    labels = np.full(x.size, STRUCTURES_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -2916,7 +3047,7 @@ def _generate_lattice_structure_points(
     x = x_center + x_local * cos_yaw - y_local * sin_yaw
     y = y_center + x_local * sin_yaw + y_local * cos_yaw
     z = base + z_local
-    labels = np.full(x.size, 5, dtype=np.int32)
+    labels = np.full(x.size, STRUCTURES_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -3011,7 +3142,7 @@ def _generate_bridge_points(
     x = np.concatenate([x_deck, x_rail, x_sup])
     y = np.concatenate([y_deck, y_rail, y_sup])
     z = np.concatenate([z_deck, z_rail, z_sup])
-    labels = np.full(x.size, 5, dtype=np.int32)
+    labels = np.full(x.size, STRUCTURES_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -3027,7 +3158,7 @@ def _assemble_structure_points(
     xy_noise: float = 0.01,
     z_noise: float = 0.01,
 ) -> np.ndarray:
-    """Transform local structure coordinates into world space and assign class-5 labels."""
+    """Transform local structure coordinates into world space and assign class-5 / structures labels."""
     if x_local.size == 0:
         return np.empty((0, 4), dtype=np.float64)
 
@@ -3042,7 +3173,7 @@ def _assemble_structure_points(
     if z_noise > 0.0:
         z = z + rng.normal(0.0, float(z_noise), size=z.shape[0])
     z = np.maximum(z, base + 0.01)
-    labels = np.full(x.shape[0], 5, dtype=np.int32)
+    labels = np.full(x.shape[0], STRUCTURES_CLASS_ID, dtype=np.int32)
     return np.column_stack((x, y, z, labels))
 
 
@@ -4804,7 +4935,7 @@ def place_objects(
     # ------------------------------------------------------------------
     # Class 4: buildings (cuboids sampled on walls + roof)
     # ------------------------------------------------------------------
-    n_building_points = int(points_per_class.get(4, 0))
+    n_building_points = int(points_per_class.get(BUILDINGS_CLASS_ID, 0))
     if n_building_points > 0:
         n_buildings_eff = max(1, min(num_buildings, n_building_points))
         points_per_building = _split_count_random(
@@ -5031,7 +5162,7 @@ def place_objects(
     # ------------------------------------------------------------------
     # Class 5: structures
     # ------------------------------------------------------------------
-    n_structure_points = int(points_per_class.get(5, 0))
+    n_structure_points = int(points_per_class.get(STRUCTURES_CLASS_ID, 0))
     if n_structure_points > 0:
         n_struct_eff = max(1, min(num_structures, n_structure_points))
         per_struct = _split_count_random(
@@ -5433,7 +5564,7 @@ def _generate_surface_noise_artifacts(
         rng,
         base_cloud,
         int(n_points),
-        preferred_labels=(ARTIFICIAL_SURFACE_CLASS_ID, NATURAL_SURFACE_CLASS_ID, LOW_VEGETATION_CLASS_ID, 4, 5),
+        preferred_labels=(ARTIFICIAL_SURFACE_CLASS_ID, NATURAL_SURFACE_CLASS_ID, LOW_VEGETATION_CLASS_ID, BUILDINGS_CLASS_ID, STRUCTURES_CLASS_ID),
     )
     if anchors.size == 0:
         x, y = _sample_xy(rng, int(n_points), area_size=area_size)
@@ -5470,7 +5601,7 @@ def _generate_hanging_point_artifacts(
         rng,
         base_cloud,
         int(n_points),
-        preferred_labels=(HIGH_VEGETATION_CLASS_ID, 4, 5, VEHICLES_CLASS_ID),
+        preferred_labels=(HIGH_VEGETATION_CLASS_ID, BUILDINGS_CLASS_ID, STRUCTURES_CLASS_ID, VEHICLES_CLASS_ID),
     )
     if anchors.size == 0:
         x, y = _sample_xy(rng, int(n_points), area_size=area_size)
@@ -5577,7 +5708,7 @@ def _generate_false_reflection_artifacts(
         rng,
         base_cloud,
         int(n_points),
-        preferred_labels=(ARTIFICIAL_SURFACE_CLASS_ID, 4, 5, VEHICLES_CLASS_ID),
+        preferred_labels=(ARTIFICIAL_SURFACE_CLASS_ID, BUILDINGS_CLASS_ID, STRUCTURES_CLASS_ID, VEHICLES_CLASS_ID),
     )
     if anchors.size == 0:
         return _generate_hanging_point_artifacts(
@@ -5778,6 +5909,10 @@ def export_to_ply(point_cloud: np.ndarray, output_path: Path) -> None:
     with output_path.open("w", encoding="utf-8") as f:
         f.write("ply\n")
         f.write("format ascii 1.0\n")
+        for class_id in CLASS_IDS:
+            f.write(f"comment {PLY_LABEL_COMMENT_PREFIX} {class_id} {CLASS_NAMES[class_id]}\n")
+        generation_order = " ".join(str(class_id) for class_id in CLASS_GENERATION_ORDER)
+        f.write(f"comment {PLY_GENERATION_ORDER_COMMENT_PREFIX} {generation_order}\n")
         f.write(f"element vertex {xyz.shape[0]}\n")
         f.write("property float x\n")
         f.write("property float y\n")
@@ -5896,6 +6031,8 @@ def _print_scene_params(
     print(f"Random seed: {seed}")
     print(f"Terrain relief [0..1]: {terrain_relief:.2f}")
     print(f"Object count mode: {mode}")
+    print(f"Class labels: {format_class_label_mapping()}")
+    print(f"Generation order: {format_class_generation_order()}")
     class_distribution = ", ".join(
         f"{class_id}={class_ratios[class_id] * 100.0:.1f}%"
         for class_id in CLASS_IDS
@@ -6632,8 +6769,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         nargs=len(CLASS_IDS),
         metavar="PCT",
         help=(
-            "Optional custom class shares in percent for classes 0..7 "
-            f"({len(CLASS_IDS)} values expected). "
+            "Optional custom class shares in percent for label order "
+            f"{format_class_label_mapping()} ({len(CLASS_IDS)} values expected). "
             "Example: --class-percentages 13 38 14 16 10 4 2 3"
         ),
     )
@@ -6700,7 +6837,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--building-count",
         type=int,
-        help="Optional custom number of generated buildings (class 4).",
+        help=f"Optional custom number of generated buildings (class {BUILDINGS_CLASS_ID}).",
     )
     parser.add_argument(
         "--building-roof-type-percentages",
@@ -6734,7 +6871,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--structure-count",
         type=int,
-        help="Optional custom number of generated structures (class 5).",
+        help=f"Optional custom number of generated structures (class {STRUCTURES_CLASS_ID}).",
     )
     parser.add_argument(
         "--structure-type-percentages",
