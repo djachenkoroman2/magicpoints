@@ -1,5 +1,8 @@
 # Runtime dependencies for MagicPoints
 
+# Point-cloud visualization in the synthetic generator CLI
+matplotlib>=3.8,<4
+
 # Numerical processing and point cloud data handling
 numpy>=1.24,<3
 scipy>=1.13,<2

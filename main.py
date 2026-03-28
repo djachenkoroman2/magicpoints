@@ -88,6 +88,7 @@ DEFAULT_MAX_POINTS = DEFAULT_OPEN_POINT_CLOUD_DOWNSAMPLE_LIMIT
 DEFAULT_POINT_SIZE = 3.0
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_DIR / "data"
+CFGS_DIR = PROJECT_DIR / "cfgs"
 ICONS_DIR = PROJECT_DIR / "assets" / "icons"
 SETTINGS_PATH = PROJECT_DIR / "settings.yaml"
 DEFAULT_VIEWPORT_BACKGROUND = (0.08, 0.09, 0.11)
@@ -386,6 +387,11 @@ def ensure_data_dir() -> Path:
     output_dir = resolve_output_directory(APP_SETTINGS.output_directory)
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
+
+
+def ensure_cfgs_dir() -> Path:
+    CFGS_DIR.mkdir(parents=True, exist_ok=True)
+    return CFGS_DIR
 
 
 def normalize_field_name(name: str) -> str:
@@ -3202,35 +3208,35 @@ def export_point_cloud_data_to_ply(cloud: PointCloudData, output_path: Path) -> 
 
 
 FALLBACK_SYNTHETIC_CLASS_NAMES: Dict[int, str] = {
-    0: "Artificial surface",
-    1: "Natural surface",
-    2: "High vegetation",
-    3: "Low vegetation",
-    4: "Buildings",
-    5: "Structures",
-    6: "Artifacts",
-    7: "Vehicles",
+    1: "Artificial surface",
+    2: "Natural surface",
+    3: "High vegetation",
+    4: "Low vegetation",
+    5: "Buildings",
+    6: "Structures",
+    7: "Artifacts",
+    8: "Vehicles",
 }
 FALLBACK_SYNTHETIC_CLASS_COLORS: Dict[int, Tuple[float, float, float]] = {
-    0: (0.35, 0.35, 0.35),
-    1: (0.55, 0.39, 0.22),
-    2: (0.05, 0.45, 0.12),
-    3: (0.35, 0.75, 0.30),
-    4: (0.82, 0.22, 0.18),
-    5: (0.85, 0.68, 0.20),
-    6: (0.68, 0.18, 0.72),
-    7: (0.15, 0.40, 0.85),
+    1: (0.35, 0.35, 0.35),
+    2: (0.55, 0.39, 0.22),
+    3: (0.05, 0.45, 0.12),
+    4: (0.35, 0.75, 0.30),
+    5: (0.82, 0.22, 0.18),
+    6: (0.85, 0.68, 0.20),
+    7: (0.68, 0.18, 0.72),
+    8: (0.15, 0.40, 0.85),
 }
-FALLBACK_SYNTHETIC_CLASS_GENERATION_ORDER: Tuple[int, ...] = (4, 0, 2, 5, 7, 3, 6, 1)
+FALLBACK_SYNTHETIC_CLASS_GENERATION_ORDER: Tuple[int, ...] = (5, 1, 3, 6, 8, 4, 7, 2)
 FALLBACK_SYNTHETIC_CLASS_GENERATION_RULES: Dict[int, str] = {
-    0: "Sampled only inside generated artificial-surface zones; natural-surface sampling is masked out there.",
-    1: "Sampled after object placement and only outside artificial-surface zones.",
-    2: "Trees are placed outside artificial-surface zones and away from building footprints.",
-    3: "Shrubs and grass patches avoid artificial-surface zones and building footprints.",
-    4: "Placed before artificial-surface point sampling to anchor sidewalks/front areas; footprints avoid detached artificial surfaces and other buildings.",
-    5: "Placed after buildings and vegetation; footprints avoid building footprints.",
-    6: "Generated last from scene geometry and acquisition-error models; final class share can override the base class distribution.",
-    7: "Placed only on vehicle-allowed artificial-surface zones and kept separated from other vehicles.",
+    1: "Sampled only inside generated artificial-surface zones; natural-surface sampling is masked out there.",
+    2: "Sampled after object placement and only outside artificial-surface zones.",
+    3: "Trees are placed outside artificial-surface zones and away from building footprints.",
+    4: "Shrubs and grass patches avoid artificial-surface zones and building footprints.",
+    5: "Placed before artificial-surface point sampling to anchor sidewalks/front areas; footprints avoid detached artificial surfaces and other buildings.",
+    6: "Placed after buildings and vegetation; footprints avoid building footprints.",
+    7: "Generated last from scene geometry and acquisition-error models; final class share can override the base class distribution.",
+    8: "Placed only on vehicle-allowed artificial-surface zones and kept separated from other vehicles.",
 }
 
 
@@ -4221,7 +4227,7 @@ class SyntheticGenerationDialog(QDialog):
         self.artifacts_enabled_check = QCheckBox("Enable artifact generation", self)
         self.artifacts_enabled_check.setChecked(initial_artifacts_enabled)
         self.artifacts_enabled_check.setToolTip(
-            "Generate synthetic measurement defects and acquisition errors for class 6."
+            "Generate synthetic measurement defects and acquisition errors for class 7."
         )
         self.artifacts_enabled_check.toggled.connect(self._update_artifact_settings_state)
 
@@ -4243,7 +4249,7 @@ class SyntheticGenerationDialog(QDialog):
         self.artifact_point_fraction_spin.setSingleStep(0.01)
         self.artifact_point_fraction_spin.setValue(initial_artifact_point_fraction)
         self.artifact_point_fraction_spin.setToolTip(
-            "Final share of class 6 points. Remaining class shares are rescaled proportionally."
+            "Final share of class 7 points. Remaining class shares are rescaled proportionally."
         )
         self.artifact_point_fraction_spin.valueChanged.connect(self._update_artifact_settings_state)
 
@@ -4397,7 +4403,7 @@ class SyntheticGenerationDialog(QDialog):
 
         form_general = QFormLayout()
         artifact_hint_label = QLabel(
-            "Artifact point fraction controls the final share of class 6 points. The remaining classes are rescaled proportionally.",
+            "Artifact point fraction controls the final share of class 7 points. The remaining classes are rescaled proportionally.",
             self,
         )
         artifact_hint_label.setWordWrap(True)
@@ -4594,7 +4600,7 @@ class SyntheticGenerationDialog(QDialog):
                 f"Generation order: {generation_order_note}\n"
                 "Hover class percentage controls for class-specific placement rules and overlap limits. "
                 "When custom distributions are enabled, percentages must sum to 100%. "
-                "Artifact point fraction controls the final share of class 6."
+                "Artifact point fraction controls the final share of class 7."
             ),
             self,
         )
@@ -4974,7 +4980,7 @@ class SyntheticGenerationDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Generation Configuration",
-            str(ensure_data_dir() / default_name),
+            str(ensure_cfgs_dir() / default_name),
             "YAML Files (*.yaml *.yml);;All Files (*)",
         )
         if not path:
@@ -5002,7 +5008,7 @@ class SyntheticGenerationDialog(QDialog):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Import Generation Configuration",
-            str(ensure_data_dir()),
+            str(ensure_cfgs_dir()),
             "YAML Files (*.yaml *.yml);;All Files (*)",
         )
         if not path:

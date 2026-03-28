@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Synthetic labeled landscape point cloud generator.
+Synthetic labeled exterior landscape point cloud generator.
 
 The script generates a procedural scene where each point has:
     x, y, z, label
 
 Labels:
-    0 - artificial surface
-    1 - natural surface
-    2 - high vegetation
-    3 - low vegetation
-    4 - buildings
-    5 - structures
-    6 - artifacts
-    7 - vehicles
+    1 - artificial surface
+    2 - natural surface
+    3 - high vegetation
+    4 - low vegetation
+    5 - buildings
+    6 - structures
+    7 - artifacts
+    8 - vehicles
 """
 
 from __future__ import annotations
@@ -71,14 +71,19 @@ def ensure_data_dir() -> Path:
     return DATA_DIR
 
 
-ARTIFICIAL_SURFACE_CLASS_ID = 0
-NATURAL_SURFACE_CLASS_ID = 1
-HIGH_VEGETATION_CLASS_ID = 2
-LOW_VEGETATION_CLASS_ID = 3
-BUILDINGS_CLASS_ID = 4
-STRUCTURES_CLASS_ID = 5
-ARTIFACTS_CLASS_ID = 6
-VEHICLES_CLASS_ID = 7
+def _build_cli_sample_output_stem(total_points: int, seed: int, sample_index: int) -> str:
+    """Build a deterministic file stem for multi-sample CLI exports."""
+    return f"synthetic_seed_{int(seed)}_n_{int(total_points)}_{int(sample_index)}"
+
+
+ARTIFICIAL_SURFACE_CLASS_ID = 1
+NATURAL_SURFACE_CLASS_ID = 2
+HIGH_VEGETATION_CLASS_ID = 3
+LOW_VEGETATION_CLASS_ID = 4
+BUILDINGS_CLASS_ID = 5
+STRUCTURES_CLASS_ID = 6
+ARTIFACTS_CLASS_ID = 7
+VEHICLES_CLASS_ID = 8
 
 
 CLASS_NAMES: Dict[int, str] = {
@@ -1530,7 +1535,7 @@ def _class_ratios_from_percentages(
     """
     Build normalized per-class ratios from optional percentages.
     - None -> default distribution.
-    - Sequence -> 8 percentages for classes 0..7.
+    - Sequence -> 8 percentages for classes 1..8.
     - Dict -> class_id -> percentage; missing classes are treated as 0.
     """
     if class_percentages is None:
@@ -2414,10 +2419,10 @@ def generate_terrain(
     artificial_zones: Sequence[Dict[str, object]] | None = None,
 ) -> Tuple[np.ndarray, Callable[[np.ndarray, np.ndarray], np.ndarray], List[Dict[str, object]]]:
     """
-    Generate natural terrain (class 1) and return:
+    Generate natural terrain (class 2) and return:
       - terrain points (N, 4)
       - terrain height function z=f(x,y)
-      - artificial zones metadata used to mask class 1 sampling
+      - artificial zones metadata used to mask class 2 sampling
     `terrain_relief` controls elevation amplitude in [0,1]:
       0 -> almost flat, 1 -> mountainous.
     """
@@ -2984,7 +2989,7 @@ def _generate_lattice_structure_points(
         x = x_center + rng.normal(0.0, 0.08, size=n_points)
         y = y_center + rng.normal(0.0, 0.08, size=n_points)
         z = base + rng.uniform(0.0, height, size=n_points)
-        labels = np.full(n_points, 5, dtype=np.int32)
+        labels = np.full(n_points, STRUCTURES_CLASS_ID, dtype=np.int32)
         return np.column_stack((x, y, z, labels))
 
     n_columns = max(1, int(n_points * 0.40))
@@ -3158,7 +3163,7 @@ def _assemble_structure_points(
     xy_noise: float = 0.01,
     z_noise: float = 0.01,
 ) -> np.ndarray:
-    """Transform local structure coordinates into world space and assign class-5 / structures labels."""
+    """Transform local structure coordinates into world space and assign class-6 / structures labels."""
     if x_local.size == 0:
         return np.empty((0, 4), dtype=np.float64)
 
@@ -4732,7 +4737,7 @@ def _generate_shrub_points(
     shrub_max_top_height: float,
     shrub_min_bottom_height: float,
 ) -> np.ndarray:
-    """Generate one shrub cluster (class 3) with crown-like geometry."""
+    """Generate one shrub cluster (class 4) with crown-like geometry."""
     if n_points <= 0:
         return np.empty((0, 4), dtype=np.float64)
 
@@ -4787,7 +4792,7 @@ def _generate_grass_patch_points(
     grass_patch_max_size_y: float,
     grass_max_height: float,
 ) -> np.ndarray:
-    """Generate one grassy patch (class 3) as an anisotropic ellipse."""
+    """Generate one grassy patch (class 4) as an anisotropic ellipse."""
     if n_points <= 0:
         return np.empty((0, 4), dtype=np.float64)
 
@@ -4933,7 +4938,7 @@ def place_objects(
     _emit_progress(progress_callback, 0.16, "Generating buildings")
 
     # ------------------------------------------------------------------
-    # Class 4: buildings (cuboids sampled on walls + roof)
+    # Class 5: buildings (cuboids sampled on walls + roof)
     # ------------------------------------------------------------------
     n_building_points = int(points_per_class.get(BUILDINGS_CLASS_ID, 0))
     if n_building_points > 0:
@@ -5051,7 +5056,7 @@ def place_objects(
     _emit_progress(progress_callback, 0.32, "Generating artificial surfaces")
 
     # ------------------------------------------------------------------
-    # Class 0: artificial surfaces
+    # Class 1: artificial surfaces
     # ------------------------------------------------------------------
     n_artificial = int(points_per_class.get(ARTIFICIAL_SURFACE_CLASS_ID, 0))
     if n_artificial > 0 and artificial_zones:
@@ -5076,7 +5081,7 @@ def place_objects(
     _emit_progress(progress_callback, 0.48, "Generating trees")
 
     # ------------------------------------------------------------------
-    # Class 2: high vegetation (trees)
+    # Class 3: high vegetation (trees)
     # ------------------------------------------------------------------
     n_tree_points = int(points_per_class.get(HIGH_VEGETATION_CLASS_ID, 0))
     if n_tree_points > 0:
@@ -5160,7 +5165,7 @@ def place_objects(
     _emit_progress(progress_callback, 0.62, "Generating structures")
 
     # ------------------------------------------------------------------
-    # Class 5: structures
+    # Class 6: structures
     # ------------------------------------------------------------------
     n_structure_points = int(points_per_class.get(STRUCTURES_CLASS_ID, 0))
     if n_structure_points > 0:
@@ -5206,7 +5211,7 @@ def place_objects(
     _emit_progress(progress_callback, 0.74, "Generating vehicles")
 
     # ------------------------------------------------------------------
-    # Class 7: vehicles (car / truck / bus on drivable artificial surfaces)
+    # Class 8: vehicles (car / truck / bus on drivable artificial surfaces)
     # ------------------------------------------------------------------
     n_vehicle_points = int(points_per_class.get(VEHICLES_CLASS_ID, 0))
     vehicle_zones = [zone for zone in artificial_zones if bool(zone.get("vehicle_allowed", False))]
@@ -5279,7 +5284,7 @@ def place_objects(
     _emit_progress(progress_callback, 0.84, "Generating low vegetation")
 
     # ------------------------------------------------------------------
-    # Class 3: low vegetation (shrubs + grassy patches)
+    # Class 4: low vegetation (shrubs + grassy patches)
     # ------------------------------------------------------------------
     n_low_veg = int(points_per_class.get(LOW_VEGETATION_CLASS_ID, 0))
     if n_low_veg > 0:
@@ -5369,7 +5374,7 @@ def place_objects(
     _emit_progress(progress_callback, 0.94, "Generating artifacts")
 
     # ------------------------------------------------------------------
-    # Class 6: artifacts (measurement defects / acquisition errors)
+    # Class 7: artifacts (measurement defects / acquisition errors)
     # ------------------------------------------------------------------
     n_artifacts = int(points_per_class.get(ARTIFACTS_CLASS_ID, 0))
     if n_artifacts > 0:
@@ -5827,12 +5832,23 @@ def _generate_artifact_points(
     rng.shuffle(artifact_cloud, axis=0)
     return artifact_cloud[: int(n_points)]
 
-def visualize_point_cloud(points: np.ndarray, labels: np.ndarray) -> None:
+def visualize_point_cloud(points: np.ndarray, labels: np.ndarray) -> bool:
     """
     Interactive 3D scatter visualization with color-by-class and legend.
+    Returns True when the window is shown, False when matplotlib is unavailable.
     """
-    import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+    except ModuleNotFoundError as exc:
+        if exc.name and exc.name.split(".", 1)[0] == "matplotlib":
+            print(
+                "Skipping visualization: optional dependency 'matplotlib' is not installed. "
+                "Install it or rerun with '--no-visualize'.",
+                file=sys.stderr,
+            )
+            return False
+        raise
 
     xyz = np.asarray(points, dtype=np.float64)
     labels_arr = np.asarray(labels, dtype=np.int32)
@@ -5879,6 +5895,7 @@ def visualize_point_cloud(points: np.ndarray, labels: np.ndarray) -> None:
     ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
     plt.tight_layout()
     plt.show()
+    return True
 
 
 def export_to_csv(point_cloud: np.ndarray, output_path: Path) -> None:
@@ -5892,6 +5909,19 @@ def export_to_csv(point_cloud: np.ndarray, output_path: Path) -> None:
         delimiter=",",
         header="x,y,z,label",
         comments="",
+        fmt=fmt,
+    )
+
+
+def export_to_txt(point_cloud: np.ndarray, output_path: Path) -> None:
+    """Export (N,4) cloud to plain text as `x y z label` without a header."""
+    cloud = np.array(point_cloud, copy=True)
+    cloud[:, 3] = cloud[:, 3].astype(np.int32)
+    fmt = ["%.6f", "%.6f", "%.6f", "%d"]
+    np.savetxt(
+        output_path,
+        cloud,
+        delimiter=" ",
         fmt=fmt,
     )
 
@@ -6141,6 +6171,7 @@ def _run_pipeline(
     total_points: int,
     show_visualization: bool,
     save_csv: bool,
+    save_txt: bool,
     save_ply: bool,
     area_width: float,
     area_length: float,
@@ -6179,6 +6210,9 @@ def _run_pipeline(
     grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
     grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
     grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
+    output_csv_path: Path | None = None,
+    output_txt_path: Path | None = None,
+    output_ply_path: Path | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """
@@ -6480,13 +6514,30 @@ def _run_pipeline(
     _print_stats(labels)
 
     if save_csv:
-        _emit_progress(progress_callback, 0.97, "Saving CSV")
-        csv_path = ensure_data_dir() / "synthetic_landscape_point_cloud.csv"
+        _emit_progress(progress_callback, 0.965, "Saving CSV")
+        csv_path = (
+            Path(output_csv_path)
+            if output_csv_path is not None
+            else ensure_data_dir() / "synthetic_landscape_point_cloud.csv"
+        )
         export_to_csv(point_cloud, csv_path)
         print(f"Saved CSV: {csv_path}")
+    if save_txt:
+        _emit_progress(progress_callback, 0.98, "Saving TXT")
+        txt_path = (
+            Path(output_txt_path)
+            if output_txt_path is not None
+            else ensure_data_dir() / "synthetic_landscape_point_cloud.txt"
+        )
+        export_to_txt(point_cloud, txt_path)
+        print(f"Saved TXT: {txt_path}")
     if save_ply:
-        _emit_progress(progress_callback, 0.99, "Saving PLY")
-        ply_path = ensure_data_dir() / "synthetic_landscape_point_cloud.ply"
+        _emit_progress(progress_callback, 0.995, "Saving PLY")
+        ply_path = (
+            Path(output_ply_path)
+            if output_ply_path is not None
+            else ensure_data_dir() / "synthetic_landscape_point_cloud.ply"
+        )
         export_to_ply(point_cloud, ply_path)
         print(f"Saved PLY: {ply_path}")
 
@@ -6543,8 +6594,8 @@ def generate_point_cloud(
     Public API for programmatic generation without side effects:
       - no matplotlib window
       - no CSV/PLY files written
-      - optional custom class percentages for classes 0..7
-      - optional custom number of artificial surface objects (class 0)
+      - optional custom class percentages for classes 1..8
+      - optional custom number of artificial surface objects (class 1)
       - optional custom artificial surface type percentages
       - optional custom number of tree instances
       - optional custom tree crown type percentages
@@ -6565,6 +6616,7 @@ def generate_point_cloud(
         total_points=int(total_points),
         show_visualization=False,
         save_csv=False,
+        save_txt=False,
         save_ply=False,
         area_width=float(area_width),
         area_length=float(area_length),
@@ -6646,6 +6698,9 @@ def main(
     grass_patch_max_size_x: float = LOW_VEG_DEFAULTS["grass_patch_max_size_x"],
     grass_patch_max_size_y: float = LOW_VEG_DEFAULTS["grass_patch_max_size_y"],
     grass_max_height: float = LOW_VEG_DEFAULTS["grass_max_height"],
+    save_csv: bool = False,
+    save_txt: bool = True,
+    show_visualization: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> np.ndarray:
     """
@@ -6665,13 +6720,15 @@ def main(
       - uses default low-vegetation generation unless custom values are provided
       - optional progress callback receiving `(progress, stage)` updates
       - prints stats
-      - saves CSV + PLY
-      - opens interactive visualization
+      - does not save CSV unless explicitly enabled
+      - saves TXT + PLY
+      - does not open interactive visualization unless explicitly enabled
     """
     return _run_pipeline(
         total_points=int(total_points),
-        show_visualization=True,
-        save_csv=True,
+        show_visualization=bool(show_visualization),
+        save_csv=bool(save_csv),
+        save_txt=bool(save_txt),
         save_ply=True,
         area_width=float(area_width),
         area_length=float(area_length),
@@ -6717,7 +6774,13 @@ def main(
 def build_arg_parser() -> argparse.ArgumentParser:
     """Create CLI argument parser."""
     parser = argparse.ArgumentParser(
-        description="Generate synthetic labeled landscape point cloud."
+        description="Generate synthetic labeled exterior landscape point cloud."
+    )
+    parser.add_argument(
+        "config_path",
+        nargs="?",
+        type=Path,
+        help="Optional positional path to a YAML generation configuration file.",
     )
     parser.add_argument(
         "--config",
@@ -6777,7 +6840,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artificial-surface-count",
         type=int,
-        help="Optional custom number of generated artificial surface objects (class 0).",
+        help=f"Optional custom number of generated artificial surface objects (class {ARTIFICIAL_SURFACE_CLASS_ID}).",
     )
     parser.add_argument(
         "--artificial-surface-type-percentages",
@@ -6794,7 +6857,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tree-count",
         type=int,
-        help="Optional custom number of generated tree instances (class 2).",
+        help=f"Optional custom number of generated tree instances (class {HIGH_VEGETATION_CLASS_ID}).",
     )
     parser.add_argument(
         "--tree-crown-type-percentages",
@@ -6902,7 +6965,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--artifacts-enabled",
         action=argparse.BooleanOptionalAction,
         default=bool(ARTIFACT_DEFAULTS["enabled"]),
-        help="Enable generation of artifact points (class 6).",
+        help=f"Enable generation of artifact points (class {ARTIFACTS_CLASS_ID}).",
     )
     parser.add_argument(
         "--artifact-global-intensity",
@@ -6922,7 +6985,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shrub-count",
         type=int,
-        help="Optional custom number of shrub clusters for class 3 (low vegetation).",
+        help=f"Optional custom number of shrub clusters for class {LOW_VEGETATION_CLASS_ID} (low vegetation).",
     )
     parser.add_argument(
         "--random-shrub-size",
@@ -6954,7 +7017,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--grass-patch-count",
         type=int,
-        help="Optional custom number of grass patches for class 3 (low vegetation).",
+        help=f"Optional custom number of grass patches for class {LOW_VEGETATION_CLASS_ID} (low vegetation).",
     )
     parser.add_argument(
         "--random-grass-patch-size",
@@ -6984,14 +7047,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Custom max grass height above ground in meters.",
     )
     parser.add_argument(
-        "--no-visualize",
-        action="store_true",
-        help="Disable interactive visualization window.",
+        "--visualize",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable interactive visualization window (disabled by default).",
     )
     parser.add_argument(
-        "--no-csv",
+        "--numsmpl",
+        type=int,
+        default=1,
+        help=(
+            "Number of point-cloud samples to generate from the CLI. "
+            "Values > 1 save each sample to a uniquely named file."
+        ),
+    )
+    parser.add_argument(
+        "--csv",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable CSV export (disabled by default).",
+    )
+    parser.add_argument(
+        "--no-txt",
         action="store_true",
-        help="Disable CSV export.",
+        help="Disable TXT export in `x y z label` format.",
     )
     parser.add_argument(
         "--no-ply",
@@ -7029,12 +7108,17 @@ def cli(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
     args = parser.parse_args(raw_argv)
+    if int(args.numsmpl) <= 0:
+        parser.error("`--numsmpl` must be >= 1.")
+    if args.config is not None and args.config_path is not None:
+        parser.error("Use either positional config path or `--config`, not both.")
     explicit_dests = _collect_explicit_cli_dests(parser, raw_argv)
 
     config_values = default_generation_config()
-    if args.config is not None:
+    config_path = args.config if args.config is not None else args.config_path
+    if config_path is not None:
         try:
-            config_values = load_generation_config(args.config)
+            config_values = load_generation_config(config_path)
         except ValueError as exc:
             parser.error(str(exc))
 
@@ -7119,12 +7203,47 @@ def cli(argv: Sequence[str] | None = None) -> int:
     if "grass_max_height" in explicit_dests:
         pipeline_kwargs["grass_max_height"] = float(args.grass_max_height)
 
-    _run_pipeline(
-        show_visualization=not args.no_visualize,
-        save_csv=not args.no_csv,
-        save_ply=not args.no_ply,
-        **pipeline_kwargs,
-    )
+    num_samples = int(args.numsmpl)
+    base_seed = int(pipeline_kwargs["seed"])
+    total_points = int(pipeline_kwargs["total_points"])
+    save_csv = bool(args.csv)
+    save_txt = not args.no_txt
+    save_ply = not args.no_ply
+    output_dir = ensure_data_dir() if num_samples > 1 and (save_csv or save_txt or save_ply) else None
+
+    for sample_index in range(num_samples):
+        sample_seed = base_seed + sample_index
+        sample_kwargs = dict(pipeline_kwargs)
+        sample_kwargs["seed"] = sample_seed
+
+        csv_path: Path | None = None
+        txt_path: Path | None = None
+        ply_path: Path | None = None
+        if output_dir is not None:
+            output_stem = _build_cli_sample_output_stem(total_points, sample_seed, sample_index)
+            if save_csv:
+                csv_path = output_dir / f"{output_stem}.csv"
+            if save_txt:
+                txt_path = output_dir / f"{output_stem}.txt"
+            if save_ply:
+                ply_path = output_dir / f"{output_stem}.ply"
+
+        if num_samples > 1:
+            print(
+                f"Generating sample {sample_index + 1}/{num_samples} "
+                f"(seed={sample_seed}, points={total_points})"
+            )
+
+        _run_pipeline(
+            show_visualization=bool(args.visualize),
+            save_csv=save_csv,
+            save_txt=save_txt,
+            save_ply=save_ply,
+            output_csv_path=csv_path,
+            output_txt_path=txt_path,
+            output_ply_path=ply_path,
+            **sample_kwargs,
+        )
     return 0
 
 

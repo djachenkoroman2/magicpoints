@@ -204,6 +204,7 @@ prompts/
 
 # Local generated data
 data/
+cfgs/
 
 .cursorignore
 .cursorindexingignore
